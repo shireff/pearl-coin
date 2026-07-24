@@ -81,13 +81,16 @@ pub fn try_mine_one<R: Rng>(
         }
 
         let tile_h = a_rows.len();
+        let tile_w = b_cols_list.first().map(|b| b.len()).unwrap_or(0);
+        let mut jackpot_tile = vec![0; tile_h * tile_w];
+
         for b_cols in &b_cols_list {
             if done.load(Ordering::Relaxed) {
                 return;
             }
 
-            let tile_w = b_cols.len();
-            let mut jackpot_tile = vec![0; tile_h * tile_w];
+            debug_assert_eq!(b_cols.len(), tile_w, "all b_cols must have the same width");
+            jackpot_tile.fill(0);
             let mut jackpot: [u32; 16] = [0; 16];
 
             for ll in (rank..=k).step_by(rank) {
@@ -229,19 +232,23 @@ pub fn try_mine_one_moe<R: Rng>(
         let a_rows_list = threads_partition(&config.rows_pattern, expert_tokens);
         let b_cols_list = threads_partition(&config.cols_pattern, n);
 
+        let tile_h = a_rows_list.first().map(|a| a.len()).unwrap_or(0);
+        let tile_w = b_cols_list.first().map(|b| b.len()).unwrap_or(0);
+        let mut jackpot_tile = vec![0; tile_h * tile_w];
+
         for a_rows in &a_rows_list {
             if done.load(Ordering::Relaxed) {
                 return;
             }
 
-            let tile_h = a_rows.len();
+            debug_assert_eq!(a_rows.len(), tile_h, "all a_rows must have the same height");
             for b_cols in &b_cols_list {
                 if done.load(Ordering::Relaxed) {
                     return;
                 }
 
-                let tile_w = b_cols.len();
-                let mut jackpot_tile = vec![0; tile_h * tile_w];
+                debug_assert_eq!(b_cols.len(), tile_w, "all b_cols must have the same width");
+                jackpot_tile.fill(0);
                 let mut jackpot: [u32; 16] = [0; 16];
 
                 for ll in (rank..=k).step_by(rank) {
