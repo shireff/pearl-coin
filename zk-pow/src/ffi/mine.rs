@@ -29,17 +29,18 @@ pub fn try_mine_one<R: Rng>(
     let rank = config.rank as usize;
     let (signal_min, signal_max) = signal_range.unwrap_or((SIGNAL_MIN, SIGNAL_MAX));
 
-    // Generate random matrices A (m×k) and B (k×n)
-    let a_matrix: Vec<Vec<i8>> = (0..m)
-        .map(|_| (0..k).map(|_| rng.random_range(signal_min..=signal_max)).collect())
-        .collect();
+    // Generate random matrices A (m×k) and B (k×n) as flat arrays
+    let a_matrix: Vec<i8> = (0..m * k).map(|_| rng.random_range(signal_min..=signal_max)).collect();
+    let b_matrix: Vec<i8> = (0..k * n).map(|_| rng.random_range(signal_min..=signal_max)).collect();
 
-    let b_matrix: Vec<Vec<i8>> = (0..k)
-        .map(|_| (0..n).map(|_| rng.random_range(signal_min..=signal_max)).collect())
+    // Transpose B for column-major format (n×k)
+    let b_transposed: Vec<i8> = (0..n * k)
+        .map(|idx| {
+            let i = idx / k;
+            let j = idx % k;
+            b_matrix[j * n + i]
+        })
         .collect();
-
-    // Transpose B for column-major format
-    let b_transposed: Vec<Vec<i8>> = (0..n).map(|i| (0..k).map(|j| b_matrix[j][i]).collect()).collect();
 
     let job_key = compute_job_key(&header, &config);
 
@@ -52,55 +53,49 @@ pub fn try_mine_one<R: Rng>(
     let b_all_cols: Vec<usize> = (0..n).collect();
     let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
 
-    // Add noise to matrices (noise.a is m×k, noise.b is n×k as transposed columns)
-    let a_noised: Vec<Vec<i32>> = a_matrix
-        .iter()
-        .zip(&noise.a)
-        .map(|(a_row, n_row)| a_row.iter().zip(n_row).map(|(&a, &n)| a as i32 + n as i32).collect())
+    // Add noise to matrices as flat arrays
+    let a_noised: Vec<i32> = (0..m * k)
+        .map(|idx| a_matrix[idx] as i32 + noise.a[idx / k][idx % k] as i32)
         .collect();
 
-    // noise.b contains columns of B's noise as rows, need to transpose for b_matrix (k×n)
-    let b_noised: Vec<Vec<i32>> = b_matrix
-        .iter()
-        .enumerate()
-        .map(|(row_idx, b_row)| {
-            b_row
-                .iter()
-                .enumerate()
-                .map(|(col_idx, &b)| b as i32 + noise.b[col_idx][row_idx] as i32)
-                .collect()
+    let b_noised: Vec<i32> = (0..k * n)
+        .map(|idx| b_matrix[idx] as i32 + noise.b[idx % n][idx / n] as i32)
+        .collect();
+
+    let b_noised_t: Vec<i32> = (0..n * k)
+        .map(|idx| {
+            let i = idx / k;
+            let j = idx % k;
+            b_noised[j * n + i]
         })
         .collect();
-
-    let b_noised_t: Vec<Vec<i32>> = (0..n).map(|i| (0..k).map(|j| b_noised[j][i]).collect()).collect();
 
     // Mine using pattern partitions
     for a_rows in threads_partition(&config.rows_pattern, m) {
         for b_cols in threads_partition(&config.cols_pattern, n) {
-            // same as compute_jackpot but with a and b matrices pre-noised
             let tile_h = a_rows.len();
             let tile_w = b_cols.len();
-            let mut jackpot_tile: Vec<Vec<i32>> = vec![vec![0; tile_w]; tile_h];
+            let mut jackpot_tile: Vec<i32> = vec![0; tile_h * tile_w];
             let mut jackpot: [u32; 16] = [0; 16];
 
             for ll in (rank..=k).step_by(rank) {
                 for (u, &a_idx) in a_rows.iter().enumerate() {
                     for (v, &b_idx) in b_cols.iter().enumerate() {
                         for l in ll - rank..ll {
-                            jackpot_tile[u][v] += a_noised[a_idx][l] * b_noised_t[b_idx][l];
+                            jackpot_tile[u * tile_w + v] += a_noised[a_idx * k + l] * b_noised_t[b_idx * k + l];
                         }
                     }
                 }
 
-                let xored_tile = jackpot_tile.iter().flatten().fold(0u32, |a, &x| a ^ x as u32);
+                let xored_tile = jackpot_tile.iter().fold(0u32, |a, &x| a ^ x as u32);
                 let tid = (ll / rank - 1) % JACKPOT_SIZE;
                 jackpot[tid] = jackpot[tid].rotate_left(LROT_PER_TILE) ^ xored_tile;
             }
             let jackpot_hash = compute_jackpot_hash(&jackpot, a_noise_seed);
             let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
             if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
-                let a_proof = build_matrix_proof(&a_matrix, &job_key, &a_rows, k);
-                let b_proof = build_matrix_proof(&b_transposed, &job_key, &b_cols, k);
+                let a_proof = build_matrix_proof(&a_matrix, m, k, &job_key, &a_rows);
+                let b_proof = build_matrix_proof(&b_transposed, n, k, &job_key, &b_cols);
 
                 return Ok(Some(PlainProof {
                     m,
@@ -129,7 +124,6 @@ pub fn try_mine_one_moe<R: Rng>(
     signal_range: Option<(i8, i8)>,
     wrong_jackpot_hash: bool,
 ) -> Result<Option<PlainProof>> {
-    // If we are in the non-moe case, mine via the original function.
     if config.moe.is_none() {
         return try_mine_one(rng, m, n, k, header, config, signal_range, wrong_jackpot_hash);
     }
@@ -142,18 +136,20 @@ pub fn try_mine_one_moe<R: Rng>(
 
     let rank = config.rank as usize;
     let (signal_min, signal_max) = signal_range.unwrap_or((SIGNAL_MIN, SIGNAL_MAX));
+    let ne = n * e;
 
-    // Generate random matrices A (m × k) and B (k x (n_e x n))
-    let a_matrix: Vec<Vec<i8>> = (0..m)
-        .map(|_| (0..k).map(|_| rng.random_range(signal_min..=signal_max)).collect())
+    // Generate random matrices A (m × k) and B (k × (n_e × n)) as flat arrays
+    let a_matrix: Vec<i8> = (0..m * k).map(|_| rng.random_range(signal_min..=signal_max)).collect();
+    let b_matrix: Vec<i8> = (0..k * ne).map(|_| rng.random_range(signal_min..=signal_max)).collect();
+
+    // Transpose B for column-major format (n_e × k)
+    let b_transposed: Vec<i8> = (0..ne * k)
+        .map(|idx| {
+            let i = idx / k;
+            let j = idx % k;
+            b_matrix[j * ne + i]
+        })
         .collect();
-
-    let b_matrix: Vec<Vec<i8>> = (0..k)
-        .map(|_| (0..n * e).map(|_| rng.random_range(signal_min..=signal_max)).collect())
-        .collect();
-
-    // Transpose B for column-major format
-    let b_transposed: Vec<Vec<i8>> = (0..n * e).map(|i| (0..k).map(|j| b_matrix[j][i]).collect()).collect();
 
     let job_key = compute_job_key(&header, &config);
 
@@ -161,8 +157,6 @@ pub fn try_mine_one_moe<R: Rng>(
     let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed));
 
     // Build a random routing where each token is assigned to `top_k` distinct experts.
-    // Expert 1 is the "hot" expert: each token includes it with probability HOT_BIAS,
-    // and the remaining slots are filled uniformly at random from the other experts.
     const HOT_EXPERT: usize = 1;
     const HOT_BIAS: f64 = 0.7;
     let mut routing: Vec<Vec<u32>> = vec![Vec::new(); e];
@@ -185,43 +179,27 @@ pub fn try_mine_one_moe<R: Rng>(
     let (b_noise_seed, a_noise_seed, routing_end_offsets) =
         compute_commitment_hash_with_offsets(&job_key, &a_row_major, &b_col_major, Some(&routing[..]));
 
-    // Compute noise using shared implementation from pearl_noise
     let a_all_rows: Vec<usize> = (0..m).collect();
-    let b_all_cols: Vec<usize> = (0..n * e).collect();
+    let b_all_cols: Vec<usize> = (0..ne).collect();
     let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
 
-    // Add noise to matrices (noise.a is m×k, noise.b is (n_e×n)×k as transposed columns)
-    let a_noised: Vec<Vec<i32>> = a_matrix
-        .iter()
-        .zip(&noise.a)
-        .map(|(a_row, n_row)| a_row.iter().zip(n_row).map(|(&a, &n)| a as i32 + n as i32).collect())
+    let a_noised: Vec<i32> = (0..m * k)
+        .map(|idx| a_matrix[idx] as i32 + noise.a[idx / k][idx % k] as i32)
         .collect();
 
-    // noise.b contains columns of B's noise as rows, need to transpose for b_matrix (k×(n_e×n))
-    let b_noised: Vec<Vec<i32>> = b_matrix
-        .iter()
-        .enumerate()
-        .map(|(row_idx, b_row)| {
-            b_row
-                .iter()
-                .enumerate()
-                .map(|(col_idx, &b)| b as i32 + noise.b[col_idx][row_idx] as i32)
-                .collect()
+    let b_noised: Vec<i32> = (0..k * ne)
+        .map(|idx| b_matrix[idx] as i32 + noise.b[idx % ne][idx / ne] as i32)
+        .collect();
+
+    let b_noised_t: Vec<i32> = (0..ne * k)
+        .map(|idx| {
+            let i = idx / k;
+            let j = idx % k;
+            b_noised[j * ne + i]
         })
         .collect();
 
-    let b_noised_t: Vec<Vec<i32>> = (0..n * e).map(|i| (0..k).map(|j| b_noised[j][i]).collect()).collect();
-
-    // Mine using pattern partitions
-    // Here, first, define the new a/b matrices as the subtoken matrices
     for expert_idx in 0..e {
-        // Submatrices here:
-        // - A_sub: rows corresponding to this expert (routing[expert_idx].len() rows)
-        // - B_sub: shape = k x (n_e x n)
-        // Floor the per-expert token count to a multiple of the row-pattern period
-        // so `threads_partition` can evenly partition the rows. Tokens in the tail
-        // are ignored for this expert's mining attempt but still live in the
-        // committed routing (and contribute to the `m * top_k` routing entries).
         let row_period = config.rows_pattern.period() as usize;
         let expert_tokens = (routing[expert_idx].len() / row_period) * row_period;
         if expert_tokens == 0 {
@@ -229,10 +207,9 @@ pub fn try_mine_one_moe<R: Rng>(
         }
         for a_rows in threads_partition(&config.rows_pattern, expert_tokens) {
             for b_cols in threads_partition(&config.cols_pattern, n) {
-                // same as compute_jackpot but with a and b matrices pre-noised
                 let tile_h = a_rows.len();
                 let tile_w = b_cols.len();
-                let mut jackpot_tile: Vec<Vec<i32>> = vec![vec![0; tile_w]; tile_h];
+                let mut jackpot_tile: Vec<i32> = vec![0; tile_h * tile_w];
                 let mut jackpot: [u32; 16] = [0; 16];
 
                 for ll in (rank..=k).step_by(rank) {
@@ -241,12 +218,12 @@ pub fn try_mine_one_moe<R: Rng>(
                             for l in ll - rank..ll {
                                 let global_a_idx = routing[expert_idx][a_idx] as usize;
                                 let global_b_idx = expert_idx * n + b_idx;
-                                jackpot_tile[u][v] += a_noised[global_a_idx][l] * b_noised_t[global_b_idx][l];
+                                jackpot_tile[u * tile_w + v] += a_noised[global_a_idx * k + l] * b_noised_t[global_b_idx * k + l];
                             }
                         }
                     }
 
-                    let xored_tile = jackpot_tile.iter().flatten().fold(0u32, |a, &x| a ^ x as u32);
+                    let xored_tile = jackpot_tile.iter().fold(0u32, |a, &x| a ^ x as u32);
                     let tid = (ll / rank - 1) % JACKPOT_SIZE;
                     jackpot[tid] = jackpot[tid].rotate_left(LROT_PER_TILE) ^ xored_tile;
                 }
@@ -255,8 +232,8 @@ pub fn try_mine_one_moe<R: Rng>(
                 if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
                     let global_a_rows: Vec<usize> = a_rows.iter().map(|&idx| routing[expert_idx][idx] as usize).collect();
                     let global_b_cols: Vec<usize> = b_cols.iter().map(|&idx| expert_idx * n + idx).collect();
-                    let a_proof = build_matrix_proof(&a_matrix, &job_key, &global_a_rows, k);
-                    let b_proof = build_matrix_proof(&b_transposed, &job_key, &global_b_cols, k);
+                    let a_proof = build_matrix_proof(&a_matrix, m, k, &job_key, &global_a_rows);
+                    let b_proof = build_matrix_proof(&b_transposed, ne, k, &job_key, &global_b_cols);
 
                     let routing_proof = build_routing_proof(&routing, &job_key, expert_idx, &a_rows);
 
@@ -328,16 +305,21 @@ pub fn mine_moe(
     }
 }
 
-/// Build a MatrixMerkleProof for the given matrix and row indices using pearl_blake3.
-fn build_matrix_proof(matrix: &[Vec<i8>], job_key: &[u8; 32], row_indices: &[usize], num_cols: usize) -> MatrixMerkleProof {
+/// Build a MatrixMerkleProof for the given flat matrix and row indices.
+fn build_matrix_proof(matrix: &[i8], rows: usize, cols: usize, job_key: &[u8; 32], row_indices: &[usize]) -> MatrixMerkleProof {
     let padded = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(matrix));
     let tree = pearl_blake3::MerkleTree::new(&padded, *job_key);
-    let leaf_indices = pearl_blake3::MerkleTree::compute_leaf_indices_from_rows(row_indices, (matrix.len(), num_cols));
+    let leaf_indices = pearl_blake3::MerkleTree::compute_leaf_indices_from_rows(row_indices, (rows, cols));
     let proof = tree.get_multileaf_proof(&leaf_indices);
     MatrixMerkleProof {
         proof,
         row_indices: row_indices.to_vec(),
     }
+}
+
+/// Flattens a flat i8 slice into a u8 Vec.
+fn flatten_matrix(matrix: &[i8]) -> Vec<u8> {
+    matrix.iter().map(|&x| x as u8).collect()
 }
 
 /// Flattens the jagged per-expert routing into the byte layout committed in the
@@ -367,8 +349,6 @@ fn build_routing_proof(
 ) -> MatrixMerkleProof {
     let padded = pearl_blake3::pad_to_chunk_boundary(&flatten_routing(routing));
     let tree = pearl_blake3::MerkleTree::new(&padded, *job_key);
-    // Routing is a jagged 2D array; treat the flattened form as a 1D array of u32
-    // entries and address inner indices by prefix-summing expert lengths.
     let expert_offset: usize = routing[..expert_idx].iter().map(|r| r.len()).sum();
     let total_entries: usize = routing.iter().map(|r| r.len()).sum();
     let row_indices: Vec<usize> = inner_indices.iter().map(|&i| expert_offset + i).collect();
@@ -427,10 +407,6 @@ fn compute_commitment_hash_with_offsets(
     (b_noise_seed, a_noise_seed, routing_offsets)
 }
 
-fn flatten_matrix(matrix: &[Vec<i8>]) -> Vec<u8> {
-    matrix.iter().flatten().map(|&x| x as u8).collect()
-}
-
 fn threads_partition(pattern: &PeriodicPattern, total_dimension: usize) -> Vec<Vec<usize>> {
     let period = pattern.period() as usize;
     if !total_dimension.is_multiple_of(period) {
@@ -455,15 +431,14 @@ mod tests {
 
     const TEST_MATRIX_MOD: usize = 251;
 
-    fn test_matrix(num_rows: usize, num_cols: usize) -> Vec<Vec<i8>> {
-        (0..num_rows)
-            .map(|r| (0..num_cols).map(|c| ((r * num_cols + c) % TEST_MATRIX_MOD) as i8).collect())
+    fn test_matrix(num_rows: usize, num_cols: usize) -> Vec<i8> {
+        (0..num_rows * num_cols)
+            .map(|idx| ((idx) % TEST_MATRIX_MOD) as i8)
             .collect()
     }
 
     #[test]
     fn test_build_matrix_proof_pads_to_chunk_boundary() {
-        // 3 rows x 500 cols = 1500 bytes, not a multiple of CHUNK_LEN (1024)
         let num_rows = 3;
         let num_cols = 500;
         assert_ne!((num_rows * num_cols) % CHUNK_LEN, 0);
@@ -471,7 +446,7 @@ mod tests {
         let matrix = test_matrix(num_rows, num_cols);
         let key = [42u8; 32];
 
-        let proof = build_matrix_proof(&matrix, &key, &[0, 2], num_cols);
+        let proof = build_matrix_proof(&matrix, num_rows, num_cols, &key, &[0, 2]);
 
         let padded = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&matrix));
         let expected_root = pearl_blake3::Blake3Hasher::with_key(key).hash(&padded);
@@ -483,7 +458,6 @@ mod tests {
 
     #[test]
     fn test_build_matrix_proof_aligned_unchanged() {
-        // 4 rows x 256 cols = 1024 bytes, exactly one chunk
         let num_rows = 4;
         let num_cols = 256;
         assert_eq!((num_rows * num_cols) % CHUNK_LEN, 0);
@@ -491,7 +465,7 @@ mod tests {
         let matrix = test_matrix(num_rows, num_cols);
         let key = [7u8; 32];
 
-        let proof = build_matrix_proof(&matrix, &key, &[1, 3], num_cols);
+        let proof = build_matrix_proof(&matrix, num_rows, num_cols, &key, &[1, 3]);
 
         let flat = flatten_matrix(&matrix);
         let expected_root = pearl_blake3::Blake3Hasher::with_key(key).hash(&flat);
@@ -503,10 +477,6 @@ mod tests {
 
     #[test]
     fn test_padded_blake3_hash_equals_merkle_root() {
-        // The commitment hash derives noise seeds from blake3(padded_data, key).
-        // This must equal MerkleTree::new(padded_data, key).root() so that
-        // the verifier's Merkle proof check is consistent with the miner's
-        // commitment.
         let num_rows = 3;
         let num_cols = 500;
         let matrix = test_matrix(num_rows, num_cols);
@@ -522,15 +492,9 @@ mod tests {
     fn test_moe_commitment_matches_verifier_non_aligned_routing() {
         use crate::api::proof::{MoEParams, PublicProofParams};
 
-        // The miner (`compute_commitment_hash_with_offsets`) and the verifier
-        // (`PublicProofParams::commitment_hash`) must derive identical noise seeds, even
-        // when the flattened routing length is NOT a multiple of the BLAKE3 chunk size.
-        // This only holds because `routing_hash` pads exactly like the routing Merkle
-        // tree — an unpadded routing hash matches for chunk-aligned dims but fails here.
         let job_key = [0x5au8; 32];
         let top_k = 2u16;
 
-        // 5 experts, 50 routing entries total -> 200 bytes, not a multiple of CHUNK_LEN (1024).
         let routing: Vec<Vec<u32>> = vec![
             (0..10).collect(),
             (10..22).collect(),
@@ -541,16 +505,12 @@ mod tests {
         let total_bytes = routing.iter().map(|r| r.len()).sum::<usize>() * std::mem::size_of::<u32>();
         assert_ne!(total_bytes % CHUNK_LEN, 0, "test must use non-chunk-aligned routing");
 
-        // Arbitrary padded A/B blobs; only their keyed hashes feed the commitment.
         let a_row_major = pearl_blake3::pad_to_chunk_boundary(&[1u8; 100]);
         let b_col_major = pearl_blake3::pad_to_chunk_boundary(&[2u8; 100]);
 
-        // Miner side.
         let (b_mine, a_mine, offsets) =
             compute_commitment_hash_with_offsets(&job_key, &a_row_major, &b_col_major, Some(&routing));
 
-        // Verifier side: take `hash_routing` from the actual routing Merkle proof root
-        // (what the wire carries), then recompute the seeds via the canonical path.
         let hash_routing = build_routing_proof(&routing, &job_key, 1, &[0]).proof.root;
         let params = PublicProofParams {
             block_header: IncompleteBlockHeader::new_for_test(0x207FFFFF),
@@ -589,9 +549,9 @@ mod tests {
     fn test_verify_moe() {
         let e = 4;
         let m = 1024;
-        let n = 1024; // per-expert cols in B (total = n * e = 4096)
+        let n = 1024;
         let k = 1024;
-        let rank = 32; // noise rank
+        let rank = 32;
 
         let header = IncompleteBlockHeader::new_for_test(0x207FFFFF);
         let config = MiningConfiguration {
