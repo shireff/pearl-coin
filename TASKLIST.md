@@ -11,7 +11,7 @@
 | Task ID | Title | File(s) | Function(s) | Reason | Expected Improvement | Est. Difficulty | Dependencies | Status |
 |---------|-------|---------|-------------|--------|---------------------|-----------------|--------------|--------|
 | H-01 | Flatten matrix storage in mining hot path | `zk-pow/src/ffi/mine.rs` | `try_mine_one`, `try_mine_one_moe`, `build_matrix_proof`, `flatten_matrix` | `Vec<Vec<i8>>` causes heap fragmentation and poor cache locality; flat arrays improve L1/L2 hit rate | 2-3× cache efficiency | Low | None | [x] Completed |
-| H-02 | Parallel CPU jackpot search with rayon | `zk-pow/src/ffi/mine.rs` | `try_mine_one`, `try_mine_one_moe` | Single-threaded search underutilizes modern CPUs; rayon parallel iter scales with core count | N× cores | Low | H-01 | [ ] Not Started |
+| H-02 | Parallel CPU jackpot search with rayon | `zk-pow/src/ffi/mine.rs` | `try_mine_one`, `try_mine_one_moe` | Single-threaded search underutilizes modern CPUs; rayon parallel iter scales with core count | N× cores | Low | H-01 | [x] Completed |
 | H-03 | Pre-allocate reusable buffers in hot loop | `zk-pow/src/ffi/mine.rs` | `try_mine_one`, `try_mine_one_moe` | Repeated Vec allocation in hot loop causes allocator pressure and cache thrashing | 1.5-2× | Low | H-01 | [ ] Not Started |
 | H-04 | SIMD-optimized BLAKE3 batching | `pearl-blake3/src/` | `blake3_digest`, `MerkleTree` | 7+ sequential BLAKE3 calls per attempt; SIMD + batching reduces hash overhead | 3-5× hash throughput | Medium | H-01 | [ ] Not Started |
 

@@ -3,6 +3,9 @@
 use anyhow::Result;
 use primitive_types::U256;
 use rand::Rng;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::api::proof::{IncompleteBlockHeader, MiningConfiguration, PeriodicPattern};
 use crate::api::proof_utils::{compute_hash_activations, compute_jackpot_hash};
@@ -29,11 +32,9 @@ pub fn try_mine_one<R: Rng>(
     let rank = config.rank as usize;
     let (signal_min, signal_max) = signal_range.unwrap_or((SIGNAL_MIN, SIGNAL_MAX));
 
-    // Generate random matrices A (m×k) and B (k×n) as flat arrays
     let a_matrix: Vec<i8> = (0..m * k).map(|_| rng.random_range(signal_min..=signal_max)).collect();
     let b_matrix: Vec<i8> = (0..k * n).map(|_| rng.random_range(signal_min..=signal_max)).collect();
 
-    // Transpose B for column-major format (n×k)
     let b_transposed: Vec<i8> = (0..n * k)
         .map(|idx| {
             let i = idx / k;
@@ -48,12 +49,10 @@ pub fn try_mine_one<R: Rng>(
     let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed));
     let (b_noise_seed, a_noise_seed) = compute_commitment_hash(&job_key, &a_row_major, &b_col_major);
 
-    // Compute noise using shared implementation from pearl_noise
     let a_all_rows: Vec<usize> = (0..m).collect();
     let b_all_cols: Vec<usize> = (0..n).collect();
     let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
 
-    // Add noise to matrices as flat arrays
     let a_noised: Vec<i32> = (0..m * k)
         .map(|idx| a_matrix[idx] as i32 + noise.a[idx / k][idx % k] as i32)
         .collect();
@@ -70,12 +69,25 @@ pub fn try_mine_one<R: Rng>(
         })
         .collect();
 
-    // Mine using pattern partitions
-    for a_rows in threads_partition(&config.rows_pattern, m) {
-        for b_cols in threads_partition(&config.cols_pattern, n) {
-            let tile_h = a_rows.len();
+    let a_rows_list = threads_partition(&config.rows_pattern, m);
+    let b_cols_list = threads_partition(&config.cols_pattern, n);
+
+    let result: Arc<Mutex<Option<PlainProof>>> = Arc::new(Mutex::new(None));
+    let done = Arc::new(AtomicBool::new(false));
+
+    a_rows_list.into_par_iter().for_each(|a_rows| {
+        if done.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let tile_h = a_rows.len();
+        for b_cols in &b_cols_list {
+            if done.load(Ordering::Relaxed) {
+                return;
+            }
+
             let tile_w = b_cols.len();
-            let mut jackpot_tile: Vec<i32> = vec![0; tile_h * tile_w];
+            let mut jackpot_tile = vec![0; tile_h * tile_w];
             let mut jackpot: [u32; 16] = [0; 16];
 
             for ll in (rank..=k).step_by(rank) {
@@ -94,10 +106,10 @@ pub fn try_mine_one<R: Rng>(
             let jackpot_hash = compute_jackpot_hash(&jackpot, a_noise_seed);
             let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
             if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
+                done.store(true, Ordering::Relaxed);
                 let a_proof = build_matrix_proof(&a_matrix, m, k, &job_key, &a_rows);
                 let b_proof = build_matrix_proof(&b_transposed, n, k, &job_key, &b_cols);
-
-                return Ok(Some(PlainProof {
+                let proof = PlainProof {
                     m,
                     n,
                     k,
@@ -105,12 +117,14 @@ pub fn try_mine_one<R: Rng>(
                     a: a_proof,
                     bt: b_proof,
                     moe: None,
-                }));
+                };
+                let mut guard = result.lock().unwrap();
+                *guard = Some(proof);
             }
         }
-    }
+    });
 
-    Ok(None)
+    Ok(result.lock().unwrap().clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -138,11 +152,9 @@ pub fn try_mine_one_moe<R: Rng>(
     let (signal_min, signal_max) = signal_range.unwrap_or((SIGNAL_MIN, SIGNAL_MAX));
     let ne = n * e;
 
-    // Generate random matrices A (m × k) and B (k × (n_e × n)) as flat arrays
     let a_matrix: Vec<i8> = (0..m * k).map(|_| rng.random_range(signal_min..=signal_max)).collect();
     let b_matrix: Vec<i8> = (0..k * ne).map(|_| rng.random_range(signal_min..=signal_max)).collect();
 
-    // Transpose B for column-major format (n_e × k)
     let b_transposed: Vec<i8> = (0..ne * k)
         .map(|idx| {
             let i = idx / k;
@@ -156,7 +168,6 @@ pub fn try_mine_one_moe<R: Rng>(
     let a_row_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&a_matrix));
     let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed));
 
-    // Build a random routing where each token is assigned to `top_k` distinct experts.
     const HOT_EXPERT: usize = 1;
     const HOT_BIAS: f64 = 0.7;
     let mut routing: Vec<Vec<u32>> = vec![Vec::new(); e];
@@ -179,6 +190,8 @@ pub fn try_mine_one_moe<R: Rng>(
     let (b_noise_seed, a_noise_seed, routing_end_offsets) =
         compute_commitment_hash_with_offsets(&job_key, &a_row_major, &b_col_major, Some(&routing[..]));
 
+    let routing_end_offsets = Arc::new(routing_end_offsets);
+
     let a_all_rows: Vec<usize> = (0..m).collect();
     let b_all_cols: Vec<usize> = (0..ne).collect();
     let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
@@ -199,17 +212,36 @@ pub fn try_mine_one_moe<R: Rng>(
         })
         .collect();
 
-    for expert_idx in 0..e {
+    let result: Arc<Mutex<Option<PlainProof>>> = Arc::new(Mutex::new(None));
+    let done = Arc::new(AtomicBool::new(false));
+
+    (0..e).into_par_iter().for_each(|expert_idx| {
+        if done.load(Ordering::Relaxed) {
+            return;
+        }
+
         let row_period = config.rows_pattern.period() as usize;
         let expert_tokens = (routing[expert_idx].len() / row_period) * row_period;
         if expert_tokens == 0 {
-            continue;
+            return;
         }
-        for a_rows in threads_partition(&config.rows_pattern, expert_tokens) {
-            for b_cols in threads_partition(&config.cols_pattern, n) {
-                let tile_h = a_rows.len();
+
+        let a_rows_list = threads_partition(&config.rows_pattern, expert_tokens);
+        let b_cols_list = threads_partition(&config.cols_pattern, n);
+
+        for a_rows in &a_rows_list {
+            if done.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let tile_h = a_rows.len();
+            for b_cols in &b_cols_list {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+
                 let tile_w = b_cols.len();
-                let mut jackpot_tile: Vec<i32> = vec![0; tile_h * tile_w];
+                let mut jackpot_tile = vec![0; tile_h * tile_w];
                 let mut jackpot: [u32; 16] = [0; 16];
 
                 for ll in (rank..=k).step_by(rank) {
@@ -230,6 +262,7 @@ pub fn try_mine_one_moe<R: Rng>(
                 let jackpot_hash = compute_jackpot_hash(&jackpot, a_noise_seed);
                 let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
                 if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
+                    done.store(true, Ordering::Relaxed);
                     let global_a_rows: Vec<usize> = a_rows.iter().map(|&idx| routing[expert_idx][idx] as usize).collect();
                     let global_b_cols: Vec<usize> = b_cols.iter().map(|&idx| expert_idx * n + idx).collect();
                     let a_proof = build_matrix_proof(&a_matrix, m, k, &job_key, &global_a_rows);
@@ -242,10 +275,10 @@ pub fn try_mine_one_moe<R: Rng>(
                         expert_idx: expert_idx as u16,
                         inner_a_rows: a_rows.clone(),
                         routing_proof: routing_proof.proof,
-                        routing_end_offsets,
+                        routing_end_offsets: routing_end_offsets.as_ref().clone(),
                         top_k,
                     };
-                    return Ok(Some(PlainProof {
+                    let proof = PlainProof {
                         m,
                         k,
                         n,
@@ -253,13 +286,15 @@ pub fn try_mine_one_moe<R: Rng>(
                         a: a_proof,
                         bt: b_proof,
                         moe: Some(moe_params),
-                    }));
+                    };
+                    let mut guard = result.lock().unwrap();
+                    *guard = Some(proof);
                 }
             }
         }
-    }
+    });
 
-    Ok(None)
+    Ok(result.lock().unwrap().clone())
 }
 
 /// Mines a proof for the given block header and configuration.

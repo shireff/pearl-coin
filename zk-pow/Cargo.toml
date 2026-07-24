@@ -35,6 +35,7 @@ itertools = "0.14.0"
 blake3 = "1.8"
 pearl-blake3 = { path = "../pearl-blake3", features = ["serde"] }
 pyo3 = { version = "0.24", optional = true }
+rayon = "1.10"
 
 [dev-dependencies]
 rand_chacha = "0.9"
