@@ -84,7 +84,7 @@ CORES_PER_JOB = 1
 FALLBACK_MAX_JOBS = 4
 KB_PER_GB = 1024 * 1024
 NVCC_THREAD_COUNT = "4"
-COMPUTE_CAPABILITY = os.getenv("PEARL_GEMM_ARCH", "arch=compute_90a,code=sm_90a")
+COMPUTE_CAPABILITY = os.getenv("PEARL_GEMM_ARCH", "arch=compute_120,code=sm_120")
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +423,8 @@ def _build_ext_modules():
         "csrc/gemm/jackpot_eval_launch.cu",
         "csrc/gemm/persistent_mining.cu",
         "csrc/gemm/persistent_mining_launch.cu",
+        "csrc/gemm/gpu_mining_kernel.cu",
+        "csrc/gemm/gpu_mining_launch.cu",
         "csrc/stark/gpu_stark_kernels.cu",
         "csrc/stark/gpu_stark_launch.cu",
         "csrc/blake3/blake3.cu",

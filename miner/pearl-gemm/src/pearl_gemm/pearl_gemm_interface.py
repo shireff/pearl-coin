@@ -316,6 +316,88 @@ def launch_persistent_mining(
     )
 
 
+def gpu_mine_batch(
+    a_noised,      # num_jobs x m x k, int32
+    b_noised_t,    # num_jobs x n x k, int32
+    a_rows_data,    # P x tile_h, int32
+    b_cols_data,    # Q x tile_w, int32
+    jobs,           # num_jobs x MiningJob
+    num_jobs: int,
+    P: int,
+    Q: int,
+    tile_h: int,
+    tile_w: int,
+    m: int,
+    n: int,
+    k: int,
+    rank: int,
+):
+    """GPU-native batch mining with persistent kernel.
+
+    Launches a persistent GPU kernel that searches for winning mining candidates
+    in parallel. The kernel evaluates jackpot arrays for each candidate and
+    returns all jackpots for CPU-side blake3 hashing and difficulty check.
+
+    Args:
+        a_noised (num_jobs x m x k, int32): Noised A matrices.
+        b_noised_t (num_jobs x n x k, int32): Noised B^T matrices.
+        a_rows_data (P x tile_h, int32): Row indices for tile evaluation.
+        b_cols_data (Q x tile_w, int32): Column indices for tile evaluation.
+        jobs (num_jobs x MiningJob): Mining job descriptors.
+        num_jobs (int): Number of mining jobs.
+        P (int): Number of a_rows partitions.
+        Q (int): Number of b_cols partitions.
+        tile_h (int): Tile height.
+        tile_w (int): Tile width.
+        m (int): Matrix A rows.
+        n (int): Matrix B cols.
+        k (int): Matrix inner dim.
+        rank (int): Noise rank.
+
+    Returns:
+        (num_jobs x P*Q x 16) uint32 tensor with jackpot arrays for each candidate and tile combination.
+    """
+    return pearl_gemm_cuda.gpu_mine_batch(
+        a_noised, b_noised_t, a_rows_data, b_cols_data, jobs,
+        num_jobs, P, Q, tile_h, tile_w, m, n, k, rank
+    )
+
+
+# Fake Tensor function for torch.compile support
+@torch.library.register_fake("pearl_gemm::gpu_mine_batch")
+def _abstract_gpu_mine_batch(
+    a_noised,
+    b_noised_t,
+    a_rows_data,
+    b_cols_data,
+    jobs,
+    num_jobs,
+    P,
+    Q,
+    tile_h,
+    tile_w,
+    m,
+    n,
+    k,
+    rank,
+):
+    num_combos = P * Q
+    return torch.empty({num_jobs, num_combos, 16}, dtype=torch.uint32)
+
+
+# Fake Tensor function for torch.compile support
+@torch.library.register_fake("pearl_gemm::launch_persistent_mining")
+def _abstract_launch_persistent_mining(
+    a_noised,
+    b_noised_t,
+    a_rows,
+    b_cols,
+    jobs,
+    num_jobs,
+):
+    return None
+
+
 # Fake Tensor function for torch.compile support
 @torch.library.register_fake("pearl_gemm::noise_B")
 def _abstract_noise_b(

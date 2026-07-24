@@ -15,7 +15,8 @@ void launch_lde_eval(
     int poly_degree,
     cudaStream_t stream) {
 
-    dim3 block(256);
+    // RTX 5090 optimized: 512 threads per block for maximum occupancy
+    dim3 block(512);
     dim3 grid((num_points + block.x - 1) / block.x);
 
     lde_eval_kernel<<<grid, block, 0, stream>>>(
@@ -34,7 +35,7 @@ void launch_batch_lde_eval(
     cudaStream_t stream) {
 
     int total = num_polys * num_points;
-    dim3 block(256);
+    dim3 block(512);
     dim3 grid((total + block.x - 1) / block.x);
 
     batch_lde_eval_kernel<<<grid, block, 0, stream>>>(
@@ -50,7 +51,7 @@ void launch_fri_fold(
     int layer_size,
     cudaStream_t stream) {
 
-    dim3 block(256);
+    dim3 block(512);
     dim3 grid((layer_size / 2 + block.x - 1) / block.x);
 
     fri_fold_kernel<<<grid, block, 0, stream>>>(
@@ -65,7 +66,7 @@ void launch_merkle_hash(
     int level,
     cudaStream_t stream) {
 
-    dim3 block(256);
+    dim3 block(512);
     dim3 grid((num_leaves / 2 + block.x - 1) / block.x);
 
     merkle_hash_kernel<<<grid, block, 0, stream>>>(
@@ -79,7 +80,7 @@ void launch_init_roots_of_unity(
     int num_roots,
     cudaStream_t stream) {
 
-    dim3 block(256);
+    dim3 block(512);
     dim3 grid((num_roots + block.x - 1) / block.x);
 
     init_roots_of_unity_kernel<<<grid, block, 0, stream>>>(

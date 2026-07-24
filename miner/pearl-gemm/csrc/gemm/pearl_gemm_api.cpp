@@ -24,6 +24,7 @@
 #include "../tensor_hash/tensor_hash_api.hpp"
 #include "jackpot_eval.cuh"
 #include "persistent_mining.cuh"
+#include "gpu_mining_kernel.cuh"
 #include "../stark/gpu_stark_kernels.cuh"
 
 #include <optional>
@@ -1190,6 +1191,62 @@ at::Tensor inner_hash(at::Tensor input_buffer, int64_t iterations) {
   return output;
 }
 
+at::Tensor gpu_mine_batch(
+    at::Tensor a_noised,      // num_jobs x m x k, int32
+    at::Tensor b_noised_t,    // num_jobs x n x k, int32
+    at::Tensor a_rows_data,    // P x tile_h, int32
+    at::Tensor b_cols_data,    // Q x tile_w, int32
+    at::Tensor jobs,           // num_jobs x MiningJob
+    int64_t num_jobs,
+    int64_t P,
+    int64_t Q,
+    int64_t tile_h,
+    int64_t tile_w,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t rank) {
+  CHECK_DEVICE(a_noised);
+  CHECK_DEVICE(b_noised_t);
+  CHECK_DEVICE(a_rows_data);
+  CHECK_DEVICE(b_cols_data);
+  CHECK_DEVICE(jobs);
+  CHECK_CONTIGUOUS(a_noised);
+  CHECK_CONTIGUOUS(b_noised_t);
+  CHECK_CONTIGUOUS(a_rows_data);
+  CHECK_CONTIGUOUS(b_cols_data);
+  CHECK_CONTIGUOUS(jobs);
+
+  at::cuda::CUDAGuard device_guard{(char)a_noised.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  const int num_combos = P * Q;
+  auto options = a_noised.options().dtype(torch::kUInt32);
+  auto jackpots = torch::empty({num_jobs, num_combos, JACKPOT_SIZE}, options);
+
+  pearl::mining::launch_gpu_mining(
+      a_noised.data_ptr<int32_t>(),
+      b_noised_t.data_ptr<int32_t>(),
+      a_rows_data.data_ptr<int32_t>(),
+      b_cols_data.data_ptr<int32_t>(),
+      reinterpret_cast<pearl::mining::MiningJob*>(jobs.data_ptr()),
+      jackpots.data_ptr<uint32_t>(),
+      static_cast<uint32_t>(num_jobs),
+      static_cast<uint32_t>(P),
+      static_cast<uint32_t>(Q),
+      static_cast<uint32_t>(tile_h),
+      static_cast<uint32_t>(tile_w),
+      static_cast<uint32_t>(m),
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(k),
+      static_cast<uint32_t>(rank),
+      stream);
+
+  cudaStreamSynchronize(stream);
+
+  return jackpots;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Pearl GEMM with noising/denoising and PoW extraction";
   m.def("denoise_converter", &denoise_converter,
@@ -1208,6 +1265,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused evaluate and accumulate jackpot on GPU");
   m.def("launch_persistent_mining", &launch_persistent_mining,
         "Launch persistent GPU mining kernel");
+  m.def("gpu_mine_batch", &gpu_mine_batch,
+        "GPU-native batch mining with persistent kernel",
+        py::arg("a_noised"), py::arg("b_noised_t"), py::arg("a_rows_data"),
+        py::arg("b_cols_data"), py::arg("jobs"), py::arg("num_jobs"),
+        py::arg("P"), py::arg("Q"), py::arg("tile_h"), py::arg("tile_w"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("rank"));
   m.def("tensor_hash", &run_tensor_hash,
         "CUDA hash function with configurable kernel parameters",
         py::arg("data"), py::arg("key"), py::arg("out"), py::arg("roots"),

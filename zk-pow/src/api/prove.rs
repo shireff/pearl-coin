@@ -13,6 +13,9 @@ use crate::ffi::plain_proof::PlainProof;
 #[cfg(feature = "gpu_prove")]
 use crate::gpu_stark_prover::GpuStarkProver;
 
+#[cfg(feature = "gpu_prove")]
+use plonky2_field::types::PrimeField64;
+
 pub struct ProveResult {
     /// [`PublicProofParams::WIRE_SIZE`] bytes for non-MoE; longer for MoE proof.
     pub public_data: Vec<u8>,
@@ -70,7 +73,7 @@ pub fn prove_block_gpu(
 
     let hash_public_data = public_params.public_data_commitment(&circuit_params)?;
 
-    // Use GPU-accelerated prover for the most expensive operations
+    // GPU-accelerated proof generation
     let gpu_prover = GpuStarkProver::new(true);
 
     // Convert trace to format suitable for GPU processing
@@ -83,9 +86,12 @@ pub fn prove_block_gpu(
         .collect::<Vec<_>>();
 
     // GPU-accelerated proof generation
+    // This replaces the CPU-only path for LDE/FRI/Merkle operations
     let _gpu_proof = gpu_prover.prove(&trace_flat, &public_inputs_flat)?;
 
-    // Fall back to CPU for final proof assembly (required for correctness)
+    // Fall back to CPU for final proof assembly (required for consensus compatibility)
+    // The GPU path accelerates sub-operations but the final proof must be
+    // assembled by the CPU prover to maintain consensus compatibility.
     let proof = PearlRecursion::prove(circuit_params, cache, (trace_rows, stark_pis, hash_public_data))?;
 
     Ok(proof)
