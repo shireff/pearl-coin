@@ -22,6 +22,9 @@
 #include "../blake3/blake3_constants.hpp"
 #include "../moe/build_routing_data.cuh"
 #include "../tensor_hash/tensor_hash_api.hpp"
+#include "jackpot_eval.cuh"
+#include "persistent_mining.cuh"
+#include "../stark/gpu_stark_kernels.cuh"
 
 #include <optional>
 
@@ -941,6 +944,215 @@ HostSignalHeader get_host_signal_header(at::Tensor& host_signal_header_pinned) {
   return *header;
 }
 
+// Python binding for GPU LDE evaluation
+at::Tensor run_gpu_lde_eval(
+    at::Tensor coeffs,
+    at::Tensor eval_points,
+    int num_coeffs,
+    int num_points,
+    int poly_degree) {
+  CHECK_DEVICE(coeffs);
+  CHECK_DEVICE(eval_points);
+  CHECK_CONTIGUOUS(coeffs);
+  CHECK_CONTIGUOUS(eval_points);
+
+  at::cuda::CUDAGuard device_guard{(char)coeffs.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto options = coeffs.options().dtype(torch::kUInt32);
+  auto evaluations = torch::empty({num_points}, options);
+
+  pearl::stark::launch_lde_eval(
+      coeffs.data_ptr<uint32_t>(),
+      eval_points.data_ptr<uint32_t>(),
+      evaluations.data_ptr<uint32_t>(),
+      num_coeffs, num_points, poly_degree,
+      stream);
+
+  cudaStreamSynchronize(stream);
+  return evaluations;
+}
+
+// Python binding for GPU FRI folding
+at::Tensor run_gpu_fri_fold(
+    at::Tensor layer,
+    at::Tensor challenges,
+    int layer_size) {
+  CHECK_DEVICE(layer);
+  CHECK_DEVICE(challenges);
+  CHECK_CONTIGUOUS(layer);
+  CHECK_CONTIGUOUS(challenges);
+
+  at::cuda::CUDAGuard device_guard{(char)layer.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto options = layer.options().dtype(torch::kUInt32);
+  auto folded = torch::empty({layer_size / 2}, options);
+
+  pearl::stark::launch_fri_fold(
+      layer.data_ptr<uint32_t>(),
+      folded.data_ptr<uint32_t>(),
+      challenges.data_ptr<uint32_t>(),
+      layer_size,
+      stream);
+
+  cudaStreamSynchronize(stream);
+  return folded;
+}
+
+// Python binding for GPU Merkle hashing
+at::Tensor run_gpu_merkle_hash(
+    at::Tensor leaves,
+    int num_leaves) {
+  CHECK_DEVICE(leaves);
+  CHECK_CONTIGUOUS(leaves);
+
+  at::cuda::CUDAGuard device_guard{(char)leaves.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto options = leaves.options().dtype(torch::kUInt32);
+  auto nodes = torch::empty({num_leaves / 2}, options);
+
+  pearl::stark::launch_merkle_hash(
+      leaves.data_ptr<uint32_t>(),
+      nodes.data_ptr<uint32_t>(),
+      num_leaves,
+      0,
+      stream);
+
+  cudaStreamSynchronize(stream);
+  return nodes;
+}
+
+// Python binding for jackpot tile evaluation on GPU
+std::tuple<at::Tensor, at::Tensor> evaluate_jackpot_tile(
+    at::Tensor a_noised,      // m x k, int32
+    at::Tensor b_noised_t,    // n x k, int32
+    at::Tensor a_rows,         // tile_h, int32
+    at::Tensor b_cols,         // tile_w, int32
+    int64_t rank) {
+  CHECK_DEVICE(a_noised);
+  CHECK_DEVICE(b_noised_t);
+  CHECK_DEVICE(a_rows);
+  CHECK_DEVICE(b_cols);
+  CHECK_CONTIGUOUS(a_noised);
+  CHECK_CONTIGUOUS(b_noised_t);
+  CHECK_CONTIGUOUS(a_rows);
+  CHECK_CONTIGUOUS(b_cols);
+
+  int m = int(a_noised.size(0));
+  int k = int(a_noised.size(1));
+  int n = int(b_noised_t.size(0));
+  int tile_h = int(a_rows.size(0));
+  int tile_w = int(b_cols.size(0));
+
+  check_tensor(a_noised, m, k, torch::kInt32);
+  check_tensor(b_noised_t, n, k, torch::kInt32);
+  check_tensor(a_rows, tile_h, torch::kInt32);
+  check_tensor(b_cols, tile_w, torch::kInt32);
+
+  at::cuda::CUDAGuard device_guard{(char)a_noised.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto options = a_noised.options().dtype(torch::kUInt32);
+  auto jackpot_tile = torch::empty({tile_h, tile_w}, options);
+  auto jackpot = torch::zeros({pearl::jackpot::JACKPOT_SIZE}, options);
+
+  pearl::jackpot::launch_evaluate_tile(
+      a_noised.data_ptr<int32_t>(),
+      b_noised_t.data_ptr<int32_t>(),
+      a_rows.data_ptr<int32_t>(),
+      b_cols.data_ptr<int32_t>(),
+      m, n, k, int(rank), tile_h, tile_w,
+      jackpot_tile.data_ptr<uint32_t>(),
+      jackpot.data_ptr<uint32_t>(),
+      stream);
+
+  cudaStreamSynchronize(stream);
+
+  return std::make_tuple(jackpot_tile, jackpot);
+}
+
+// Python binding for fused jackpot evaluation and accumulation
+at::Tensor fused_evaluate_accumulate_jackpot(
+    at::Tensor a_noised,      // m x k, int32
+    at::Tensor b_noised_t,    // n x k, int32
+    at::Tensor a_rows,         // tile_h, int32
+    at::Tensor b_cols,         // tile_w, int32
+    int64_t rank) {
+  CHECK_DEVICE(a_noised);
+  CHECK_DEVICE(b_noised_t);
+  CHECK_DEVICE(a_rows);
+  CHECK_DEVICE(b_cols);
+  CHECK_CONTIGUOUS(a_noised);
+  CHECK_CONTIGUOUS(b_noised_t);
+  CHECK_CONTIGUOUS(a_rows);
+  CHECK_CONTIGUOUS(b_cols);
+
+  int m = int(a_noised.size(0));
+  int k = int(a_noised.size(1));
+  int n = int(b_noised_t.size(0));
+  int tile_h = int(a_rows.size(0));
+  int tile_w = int(b_cols.size(0));
+
+  check_tensor(a_noised, m, k, torch::kInt32);
+  check_tensor(b_noised_t, n, k, torch::kInt32);
+  check_tensor(a_rows, tile_h, torch::kInt32);
+  check_tensor(b_cols, tile_w, torch::kInt32);
+
+  at::cuda::CUDAGuard device_guard{(char)a_noised.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto options = a_noised.options().dtype(torch::kUInt32);
+  auto jackpot = torch::zeros({pearl::jackpot::JACKPOT_SIZE}, options);
+
+  pearl::jackpot::launch_fused_evaluate_accumulate(
+      a_noised.data_ptr<int32_t>(),
+      b_noised_t.data_ptr<int32_t>(),
+      a_rows.data_ptr<int32_t>(),
+      b_cols.data_ptr<int32_t>(),
+      m, n, k, int(rank), tile_h, tile_w,
+      jackpot.data_ptr<uint32_t>(),
+      stream);
+
+  cudaStreamSynchronize(stream);
+
+  return jackpot;
+}
+
+void launch_persistent_mining(
+    at::Tensor a_noised,      // m x k, int32
+    at::Tensor b_noised_t,    // n x k, int32
+    at::Tensor a_rows,         // tile_h, int32
+    at::Tensor b_cols,         // tile_w, int32
+    at::Tensor jobs,           // num_jobs x PersistentJob
+    int64_t num_jobs) {
+  CHECK_DEVICE(a_noised);
+  CHECK_DEVICE(b_noised_t);
+  CHECK_DEVICE(a_rows);
+  CHECK_DEVICE(b_cols);
+  CHECK_DEVICE(jobs);
+  CHECK_CONTIGUOUS(a_noised);
+  CHECK_CONTIGUOUS(b_noised_t);
+  CHECK_CONTIGUOUS(a_rows);
+  CHECK_CONTIGUOUS(b_cols);
+  CHECK_CONTIGUOUS(jobs);
+
+  at::cuda::CUDAGuard device_guard{(char)a_noised.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  pearl::persistent::launch_persistent_mining(
+      a_noised.data_ptr<int32_t>(),
+      b_noised_t.data_ptr<int32_t>(),
+      a_rows.data_ptr<int32_t>(),
+      b_cols.data_ptr<int32_t>(),
+      reinterpret_cast<pearl::persistent::PersistentJob*>(jobs.data_ptr()),
+      static_cast<uint32_t>(num_jobs),
+      stream);
+
+  cudaStreamSynchronize(stream);
+}
+
 // Python binding for inner_hash function
 at::Tensor inner_hash(at::Tensor input_buffer, int64_t iterations) {
   CHECK_DEVICE(input_buffer);
@@ -990,6 +1202,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get host signal header");
   m.def("noise_gen", &noise_gen, "Noise generation");
   m.def("inner_hash", &inner_hash, "Inner hash function");
+  m.def("evaluate_jackpot_tile", &evaluate_jackpot_tile,
+        "Evaluate jackpot tile on GPU");
+  m.def("fused_evaluate_accumulate_jackpot", &fused_evaluate_accumulate_jackpot,
+        "Fused evaluate and accumulate jackpot on GPU");
+  m.def("launch_persistent_mining", &launch_persistent_mining,
+        "Launch persistent GPU mining kernel");
   m.def("tensor_hash", &run_tensor_hash,
         "CUDA hash function with configurable kernel parameters",
         py::arg("data"), py::arg("key"), py::arg("out"), py::arg("roots"),
@@ -1203,11 +1421,13 @@ TORCH_LIBRARY(pearl_gemm, m) {
       {at::Tag::pt2_compliant_tag});
 
   m.def("inner_hash(Tensor input_buffer, int iterations = 1) -> Tensor");
-  m.def(
-      "tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) "
-      "roots, "
-      "int num_threads = 128, int num_stages = 2, "
-      "int leaves_per_mt_block = 512) -> ()");
+  m.def("evaluate_jackpot_tile(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, int rank) -> (Tensor, Tensor)");
+  m.def("fused_evaluate_accumulate_jackpot(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, int rank) -> Tensor");
+  m.def("launch_persistent_mining(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, Tensor jobs, int num_jobs) -> ()");
+  m.def("tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
+  m.def("gpu_lde_eval(Tensor coeffs, Tensor eval_points, int num_coeffs, int num_points, int poly_degree) -> Tensor");
+  m.def("gpu_fri_fold(Tensor layer, Tensor challenges, int layer_size) -> Tensor");
+  m.def("gpu_merkle_hash(Tensor leaves, int num_leaves) -> Tensor");
   m.def(
       "commitment_hash_from_merkle_roots("
       "    Tensor A_merkle_root, "
@@ -1237,7 +1457,13 @@ TORCH_LIBRARY_IMPL(pearl_gemm, CUDA, m) {
   m.impl("denoise_converter", &denoise_converter);
   m.impl("noise_gen", &noise_gen);
   m.impl("inner_hash", &inner_hash);
+  m.impl("evaluate_jackpot_tile", &evaluate_jackpot_tile);
+  m.impl("fused_evaluate_accumulate_jackpot", &fused_evaluate_accumulate_jackpot);
+  m.impl("launch_persistent_mining", &launch_persistent_mining);
   m.impl("tensor_hash", &run_tensor_hash);
+  m.impl("gpu_lde_eval", &run_gpu_lde_eval);
+  m.impl("gpu_fri_fold", &run_gpu_fri_fold);
+  m.impl("gpu_merkle_hash", &run_gpu_merkle_hash);
   m.impl("commitment_hash_from_merkle_roots",
          &run_commitment_hash_from_merkle_roots);
   m.impl("build_routing_data", &build_routing_data);

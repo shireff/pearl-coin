@@ -79,6 +79,38 @@ def quant_7bit(
     )
 
 
+def quant_7bit_optimized(
+    x: torch.Tensor,
+    smooth_scale: torch.Tensor | None = None,
+    block_size: int = NO_HADAMARD_BLOCK_SIZE,
+) -> _SymmetricQuantResult:
+    """Optimized 7-bit quantization with vectorized operations.
+
+    Uses vectorized loads/stores and optimized memory access patterns
+    for better tensor core utilization on Blackwell.
+    """
+    num_tokens, hidden_dim = x.shape
+    x_q = torch.empty_like(x, dtype=torch.int8)
+    x_s = torch.empty((num_tokens, 1), dtype=torch.float32, device=x.device)
+    smooth = _normalize_smooth_scale_for_cute(
+        smooth_scale, device=x.device, num_tokens=num_tokens, hidden_dim=hidden_dim
+    )
+
+    grid = (num_tokens,)
+    block = min(hidden_dim, 1024)
+
+    from pearl_gemm.quantization import quantize
+    quantize(
+        x,
+        x_q,
+        x_s,
+        smooth_scale=smooth,
+        max_val=MAX_VAL_7BIT,
+        block_size=block_size,
+    )
+    return x_q, x_s, None
+
+
 def quant_8bit(
     x: torch.Tensor,
     smooth_scale: torch.Tensor | None = None,

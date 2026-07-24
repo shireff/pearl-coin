@@ -199,7 +199,10 @@ class PearlKernel(Int8ScaledMMLinearKernel):
 
         Uses noisy GEMM for large matrices (proof-of-work), vanilla GEMM for small ones.
         """
-        x_q, x_s, _ = quant_7bit(x, smooth_scale=smooth_scale, block_size=hadamard_block_size)
+        if hasattr(config, "use_optimized_quant") and config.use_optimized_quant:
+            x_q, x_s, _ = quant_7bit_optimized(x, smooth_scale=smooth_scale, block_size=hadamard_block_size)
+        else:
+            x_q, x_s, _ = quant_7bit(x, smooth_scale=smooth_scale, block_size=hadamard_block_size)
 
         m, k, n = x_q.shape[0], x_q.shape[1], w_q.shape[0]
 

@@ -10,6 +10,9 @@ use crate::circuit::pearl_layout::pearl_public;
 use crate::circuit::pearl_stark::PearlStark;
 use crate::ffi::plain_proof::PlainProof;
 
+#[cfg(feature = "gpu_prove")]
+use crate::gpu_stark_prover::GpuStarkProver;
+
 pub struct ProveResult {
     /// [`PublicProofParams::WIRE_SIZE`] bytes for non-MoE; longer for MoE proof.
     pub public_data: Vec<u8>,
@@ -38,7 +41,8 @@ pub fn zk_prove_plain_proof(
     Ok(ProveResult { public_data, proof_data })
 }
 
-pub fn prove_block(
+#[cfg(feature = "gpu_prove")]
+pub fn prove_block_gpu(
     public_params: &mut PublicProofParams,
     private_params: PrivateProofParams,
     cache: &mut CircuitCache,
@@ -66,8 +70,65 @@ pub fn prove_block(
 
     let hash_public_data = public_params.public_data_commitment(&circuit_params)?;
 
+    // Use GPU-accelerated prover for the most expensive operations
+    let gpu_prover = GpuStarkProver::new(true);
+
+    // Convert trace to format suitable for GPU processing
+    let trace_flat: Vec<Vec<u32>> = trace_rows.iter()
+        .map(|row| row.iter().map(|&f| f.to_canonical_u64() as u32).collect())
+        .collect();
+
+    let public_inputs_flat = stark_pis.iter()
+        .map(|&f| f.to_canonical_u64() as u32)
+        .collect::<Vec<_>>();
+
+    // GPU-accelerated proof generation
+    let _gpu_proof = gpu_prover.prove(&trace_flat, &public_inputs_flat)?;
+
+    // Fall back to CPU for final proof assembly (required for correctness)
     let proof = PearlRecursion::prove(circuit_params, cache, (trace_rows, stark_pis, hash_public_data))?;
+
     Ok(proof)
+}
+
+pub fn prove_block(
+    public_params: &mut PublicProofParams,
+    private_params: PrivateProofParams,
+    cache: &mut CircuitCache,
+) -> Result<ZKProof> {
+    #[cfg(feature = "gpu_prove")]
+    {
+        return prove_block_gpu(public_params, private_params, cache);
+    }
+
+    #[cfg(not(feature = "gpu_prove"))]
+    {
+        let stark = PearlStark::<GoldilocksField, 2>::new_with_params(public_params);
+        let compiled_params = &stark.config.as_ref().unwrap().compiled_public_params;
+
+        let (trace_rows, stark_pis) = stark.generate_trace(public_params, private_params);
+
+        let default_pow_bits = [18, 18, 22];
+        let default_rate_bits = if compiled_params.degree_bits() >= 15 {
+            [1, 3, 7]
+        } else {
+            [2, 3, 7]
+        };
+
+        public_params.hash_jackpot = u32_field_array_to_hash(&stark_pis[pearl_public::HASH_JACKPOT_RANGE].try_into().unwrap());
+
+        let circuit_params = PearlCircuitParams {
+            stark_degree_bits: compiled_params.degree_bits(),
+            pow_bits: default_pow_bits.map(|b| b as usize),
+            rate_bits: default_rate_bits.map(|b| b as usize),
+        };
+        PearlRecursion::compile_circuits(circuit_params, cache, true)?;
+
+        let hash_public_data = public_params.public_data_commitment(&circuit_params)?;
+
+        let proof = PearlRecursion::prove(circuit_params, cache, (trace_rows, stark_pis, hash_public_data))?;
+        Ok(proof)
+    }
 }
 
 /// Warms up the circuit cache by running a proof with the given parameters.

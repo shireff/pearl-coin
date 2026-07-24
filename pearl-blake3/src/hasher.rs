@@ -187,6 +187,21 @@ pub fn blake3_digest(data: &[u8], key: Option<[u8; 32]>) -> [u8; 32] {
     }
 }
 
+/// Compute multiple independent BLAKE3 hashes in parallel.
+///
+/// Each request is `(input_data, optional_key)`. Returns hashes in the same order.
+/// This batches independent hash operations across available CPU cores, avoiding
+/// the sequential overhead of many small hashes in hot paths like noise generation.
+pub fn hash_batch(requests: &[(&[u8], Option<Key>)]) -> Vec<Digest> {
+    requests
+        .par_iter()
+        .map(|(data, key)| match key {
+            Some(k) => *blake3::keyed_hash(k, data).as_bytes(),
+            None => *blake3::hash(data).as_bytes(),
+        })
+        .collect()
+}
+
 impl Default for Blake3Hasher {
     fn default() -> Self {
         Self::new()

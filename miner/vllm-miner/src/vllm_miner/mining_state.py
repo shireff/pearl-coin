@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import threading
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+
 from miner_base.async_loop_manager import AsyncLoopManager
 from miner_base.settings import MinerSettings
 from miner_utils import get_logger
@@ -13,6 +19,33 @@ _LOGGER = get_logger("vllm.pearl_miner")
 # Global mining state instances, should be initialized per-process
 _async_manager: AsyncLoopManager | None = None
 _pinned_pool: HostSignalHeaderPinnedPool | None = None
+
+
+@dataclass
+class DoubleBuffer:
+    """Double buffer for overlapping CPU and GPU work."""
+    front: torch.Tensor | None = None
+    back: torch.Tensor | None = None
+    lock: threading.Lock = threading.Lock()
+
+    def swap(self) -> None:
+        """Swap front and back buffers."""
+        with self.lock:
+            self.front, self.back = self.back, self.front
+
+    def get_front(self) -> torch.Tensor | None:
+        """Get the current front buffer."""
+        return self.front
+
+    def get_back(self) -> torch.Tensor | None:
+        """Get the current back buffer."""
+        return self.back
+
+    def initialize(self, buffer_shape: tuple[int, ...], dtype: torch.dtype, device: str) -> None:
+        """Initialize both buffers with the given shape and dtype."""
+        with self.lock:
+            self.front = torch.empty(buffer_shape, dtype=dtype, device=device)
+            self.back = torch.empty(buffer_shape, dtype=dtype, device=device)
 
 
 def get_async_manager() -> AsyncLoopManager:

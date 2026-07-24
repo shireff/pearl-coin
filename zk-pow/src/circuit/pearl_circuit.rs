@@ -146,7 +146,6 @@ impl PearlCircuitParams {
         for stage in 0..3 {
             validate_fri_params(stage, self.pow_bits[stage], self.rate_bits[stage])?;
         }
-        // Check that RAM lookups used in the STARK fit 2*BITS_PER_LIMB bits
         ensure!(
             compiled_params.expected_num_rows() < (1 << (2 * BITS_PER_LIMB)),
             "Too many rows for RAM lookup"
@@ -162,6 +161,28 @@ impl PearlCircuitParams {
             self.stark_degree_bits + self.rate_bits[0]
         );
         Ok(())
+    }
+
+    /// Adaptively select STARK degree bits based on problem size.
+    ///
+    /// Larger problems require higher degree to fit all rows in the trace.
+    /// Smaller problems can use lower degree to reduce proving time.
+    pub fn adaptive_degree_bits(compiled_params: &CompiledPublicParams) -> usize {
+        let num_rows = compiled_params.expected_num_rows();
+        let min_degree_bits = 13;
+        let max_degree_bits = 19;
+
+        if num_rows <= (1 << min_degree_bits) {
+            return min_degree_bits;
+        }
+
+        for degree_bits in min_degree_bits..=max_degree_bits {
+            if num_rows <= (1 << degree_bits) {
+                return degree_bits;
+            }
+        }
+
+        max_degree_bits
     }
 }
 

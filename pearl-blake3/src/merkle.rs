@@ -172,6 +172,78 @@ impl MerkleTree {
         }
         indices.into_iter().collect()
     }
+
+    /// Incrementally update a leaf and recompute the affected path to the root.
+    ///
+    /// This is more efficient than rebuilding the entire tree when only a few
+    /// leaves change between mining attempts.
+    pub fn update_leaf(&mut self, leaf_index: usize, new_data: &[u8]) -> Result<()> {
+        ensure!(
+            leaf_index < self.num_leaves(),
+            "leaf index {} out of bounds ({} leaves)",
+            leaf_index,
+            self.num_leaves()
+        );
+
+        let hasher = Blake3Hasher::with_key(self.key);
+
+        // Update leaf hash
+        let start = leaf_index * CHUNK_LEN;
+        let end = (start + CHUNK_LEN).min(new_data.len());
+        let mut chunk = [0u8; CHUNK_LEN];
+        chunk[..end - start].copy_from_slice(&new_data[start..end]);
+        let new_leaf_hash = if new_data.len() <= CHUNK_LEN {
+            hasher.hash(new_data)
+        } else {
+            hasher.hash(&chunk)
+        };
+
+        self.layers[0][leaf_index] = new_leaf_hash;
+
+        // Propagate up the tree
+        let mut current_index = leaf_index;
+        for level in 0..self.layers.len() - 1 {
+            let sibling_index = current_index ^ 1;
+            let level_nodes = &self.layers[level];
+
+            if sibling_index < level_nodes.len() {
+                let combined = hasher.parent_cv(
+                    &level_nodes[current_index.min(sibling_index)],
+                    &level_nodes[current_index.max(sibling_index)],
+                );
+                self.layers[level + 1][current_index / 2] = combined;
+            }
+
+            current_index /= 2;
+        }
+
+        Ok(())
+    }
+
+    /// Get the path from a leaf to the root for incremental updates.
+    pub fn get_path(&self, leaf_index: usize) -> Result<Vec<Digest>> {
+        ensure!(
+            leaf_index < self.num_leaves(),
+            "leaf index {} out of bounds",
+            leaf_index
+        );
+
+        let mut path = Vec::new();
+        let mut current_index = leaf_index;
+
+        for level in 0..self.layers.len() - 1 {
+            let sibling_index = current_index ^ 1;
+            let level_nodes = &self.layers[level];
+
+            if sibling_index < level_nodes.len() {
+                path.push(level_nodes[sibling_index]);
+            }
+
+            current_index /= 2;
+        }
+
+        Ok(path)
+    }
 }
 
 // ============================================================================

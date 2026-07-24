@@ -13,7 +13,7 @@ use crate::api::sanity_checks::extract_difficulty_bound;
 use crate::circuit::pearl_noise::compute_noise_for_indices;
 use crate::circuit::pearl_program::{JACKPOT_SIZE, LROT_PER_TILE};
 use crate::ffi::plain_proof::{MatrixMerkleProof, MoEProofParams, PlainProof};
-use pearl_blake3::blake3_digest;
+use pearl_blake3::{blake3_digest, hash_batch};
 
 const SIGNAL_MIN: i8 = -64;
 const SIGNAL_MAX: i8 = 64;
@@ -420,8 +420,10 @@ fn compute_commitment_hash_with_offsets(
     b_col_major: &[u8],
     opt_routing: Option<&[Vec<u32>]>,
 ) -> MoECaseOutputs {
-    let hash_a = blake3_digest(a_row_major, Some(*job_key));
-    let hash_b = blake3_digest(b_col_major, Some(*job_key));
+    let [hash_a, hash_b] = hash_batch(&[
+        (a_row_major, Some(*job_key)),
+        (b_col_major, Some(*job_key)),
+    ]).try_into().unwrap();
 
     let (hash_activations, routing_offsets) = match opt_routing {
         Some(r) => {

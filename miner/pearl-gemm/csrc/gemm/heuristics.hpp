@@ -140,6 +140,55 @@ static inline int get_pipeline_stages(int tile_size_m, int tile_size_n,
 }
 
 // ---------------------------------------------------------------------------
+// get_optimal_tile_size — NEW for M-04
+//
+// Selects the optimal GEMM tile size based on device SMEM budget and
+// compute capability.  Prefers larger tiles on high-SMEM devices to
+// improve arithmetic intensity and reduce shared memory bandwidth.
+// ---------------------------------------------------------------------------
+static inline std::tuple<int, int, int> get_optimal_tile_size(
+    int m, int n, int k, int R,
+    bool skip_denoising,
+    cudaDeviceProp const* const dprops) {
+  int const smem_size = dprops->sharedMemPerBlockOptin;
+  int const cc = dprops->major * 10 + dprops->minor;
+
+  // Base tile sizes: (tile_m, tile_n, tile_k)
+  std::vector<std::tuple<int, int, int>> candidates = {
+      {128, 256, 128},
+      {128, 128, 128},
+      {64, 256, 128},
+      {64, 128, 128},
+      {128, 256, 64},
+      {64, 256, 64},
+  };
+
+  // On SM90+ (Hopper/Blackwell) prefer larger tiles
+  if (cc >= 90) {
+    candidates.insert(candidates.begin(), {256, 256, 128});
+    candidates.insert(candidates.begin(), {192, 256, 128});
+  }
+
+  for (auto const& [tile_m, tile_n, tile_k] : candidates) {
+    int const AB_one_stage_size = tile_m * tile_k + tile_n * tile_k + 16;
+    int const C_size = tile_m * tile_n * 2;  // bf16
+    int const AxEB_size = skip_denoising
+                              ? 0
+                              : (tile_m + tile_n) * R * 2;  // fp16
+    int const C_union_size = std::max(C_size, AxEB_size);
+    int const scale_size = (tile_m + tile_n) * 4;  // fp32
+    int const rest_size = 64;
+
+    int const max_stages = (smem_size - (C_union_size + scale_size + rest_size)) / AB_one_stage_size;
+    if (max_stages >= 2) {
+      return {tile_m, tile_n, tile_k};
+    }
+  }
+
+  return {64, 128, 64};
+}
+
+// ---------------------------------------------------------------------------
 // get_num_k_blocks — UNCHANGED
 // Wave-efficiency heuristic for split-K noising kernels.
 // ---------------------------------------------------------------------------

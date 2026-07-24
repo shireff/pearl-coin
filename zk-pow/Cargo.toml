@@ -10,6 +10,7 @@ crate-type = ["rlib"]
 [features]
 embedded_cache = [] # embedded verifier cache
 pyo3 = ["dep:pyo3", "pearl-blake3/pyo3"] # Python bindings support
+gpu_prove = [] # GPU-accelerated STARK proving
 
 [dependencies]
 serde_json = "1.0"
@@ -38,6 +39,7 @@ pyo3 = { version = "0.24", optional = true }
 rayon = "1.10"
 
 [dev-dependencies]
+criterion = "0.5"
 rand_chacha = "0.9"
 
 [profile.devr]

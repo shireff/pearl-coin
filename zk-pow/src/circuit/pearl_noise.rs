@@ -59,24 +59,28 @@ pub fn get_random_hash(index: usize, seed: &[u8; 32], key: &[u8; 32], prepend_in
 // Generate uniform random matrix (A_L or B_R_transposed)
 // Only guaranteed to be correct on row_indices
 pub fn generate_uniform_random_matrix(seed: &[u8; 32], key: &[u8; 32], row_indices: &[usize], num_cols: usize) -> Vec<Vec<i8>> {
-    row_indices
-        .iter()
-        .map(|&row_idx| {
-            let start_idx = row_idx * num_cols;
-            (start_idx / BLAKE3_DIGEST_SIZE..(start_idx + num_cols).div_ceil(BLAKE3_DIGEST_SIZE))
-                .flat_map(|block| {
-                    get_random_hash(block, seed, key, 0)
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(move |(k, byte)| {
-                            let idx = block * BLAKE3_DIGEST_SIZE + k;
-                            (idx >= start_idx && idx < start_idx + num_cols)
-                                .then(|| (byte & RANGE_MASK) as i8 - ZERO_POINT_TRANSLATION)
-                        })
-                })
-                .collect()
-        })
-        .collect()
+    row_indices.par_iter().map(|&row_idx| {
+        let start_idx = row_idx * num_cols;
+        let first_block = start_idx / BLAKE3_DIGEST_SIZE;
+        let last_block = (start_idx + num_cols).div_ceil(BLAKE3_DIGEST_SIZE);
+        let mut row = Vec::with_capacity(num_cols);
+
+        for block in first_block..last_block {
+            let mut msg = [0u8; 64];
+            let prepend_value = (1 + block) as i32;
+            msg[0..4].copy_from_slice(&prepend_value.to_le_bytes());
+            msg[32..64].copy_from_slice(seed);
+            let hash = blake3_digest(&msg, Some(*key));
+            for (k, &byte) in hash.iter().enumerate() {
+                let idx = start_idx + k;
+                if idx < start_idx + num_cols {
+                    row.push((byte & RANGE_MASK) as i8 - ZERO_POINT_TRANSLATION);
+                }
+            }
+        }
+
+        row
+    }).collect()
 }
 
 // Compute high 32 bits of 64-bit product of two unsigned 32-bit integers

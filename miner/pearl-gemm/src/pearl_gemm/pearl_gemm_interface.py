@@ -234,6 +234,88 @@ def noise_B(
     )
 
 
+def evaluate_jackpot_tile(
+    a_noised,      # m x k, int32
+    b_noised_t,    # n x k, int32
+    a_rows,         # tile_h, int32
+    b_cols,         # tile_w, int32
+    rank: int,
+):
+    """Evaluate jackpot tile on GPU.
+
+    Computes dot products over rank-sized windows for each (a_rows[u], b_cols[v]) pair
+    and returns the jackpot tile and accumulated jackpot hash.
+
+    Args:
+        a_noised (m x k, int32): Noised A matrix.
+        b_noised_t (n x k, int32): Noised B^T matrix.
+        a_rows (tile_h, int32): Row indices for tile evaluation.
+        b_cols (tile_w, int32): Column indices for tile evaluation.
+        rank (int): Rank of the noise matrices (window size for dot products).
+
+    Returns:
+        Tuple of (jackpot_tile, jackpot) where:
+            jackpot_tile: (tile_h x tile_w) uint32 tensor of dot products
+            jackpot: (16,) uint32 tensor of accumulated jackpot hash
+    """
+    return pearl_gemm_cuda.evaluate_jackpot_tile(
+        a_noised, b_noised_t, a_rows, b_cols, rank
+    )
+
+
+def fused_evaluate_accumulate_jackpot(
+    a_noised,      # m x k, int32
+    b_noised_t,    # n x k, int32
+    a_rows,         # tile_h, int32
+    b_cols,         # tile_w, int32
+    rank: int,
+):
+    """Fused evaluate and accumulate jackpot on GPU.
+
+    Combines tile evaluation and hash accumulation into a single kernel launch,
+    reducing global memory traffic and launch overhead.
+
+    Args:
+        a_noised (m x k, int32): Noised A matrix.
+        b_noised_t (n x k, int32): Noised B^T matrix.
+        a_rows (tile_h, int32): Row indices for tile evaluation.
+        b_cols (tile_w, int32): Column indices for tile evaluation.
+        rank (int): Rank of the noise matrices.
+
+    Returns:
+        jackpot: (16,) uint32 tensor of accumulated jackpot hash
+    """
+    return pearl_gemm_cuda.fused_evaluate_accumulate_jackpot(
+        a_noised, b_noised_t, a_rows, b_cols, rank
+    )
+
+
+def launch_persistent_mining(
+    a_noised,      # m x k, int32
+    b_noised_t,    # n x k, int32
+    a_rows,         # tile_h, int32
+    b_cols,         # tile_w, int32
+    jobs,           # num_jobs x PersistentJob
+    num_jobs: int,
+):
+    """Launch persistent GPU mining kernel.
+
+    Launches a persistent kernel that processes multiple mining jobs on the GPU
+    without CPU intervention, reducing launch overhead.
+
+    Args:
+        a_noised (m x k, int32): Noised A matrix.
+        b_noised_t (n x k, int32): Noised B^T matrix.
+        a_rows (tile_h, int32): Row indices for tile evaluation.
+        b_cols (tile_w, int32): Column indices for tile evaluation.
+        jobs (num_jobs x PersistentJob): Job descriptors.
+        num_jobs (int): Number of jobs to process.
+    """
+    pearl_gemm_cuda.launch_persistent_mining(
+        a_noised, b_noised_t, a_rows, b_cols, jobs, num_jobs
+    )
+
+
 # Fake Tensor function for torch.compile support
 @torch.library.register_fake("pearl_gemm::noise_B")
 def _abstract_noise_b(
@@ -575,6 +657,61 @@ def tensor_hash(
     """
     return pearl_gemm_cuda.tensor_hash(
         data, key, out, roots, threads_per_block, num_stages, leaves_per_mt_block
+    )
+
+
+def gpu_lde_eval(coeffs, eval_points, num_coeffs, num_points, poly_degree):
+    """GPU-accelerated Low-Degree Extension (LDE) evaluation.
+
+    Evaluates a polynomial at multiple points using Horner's method on GPU.
+
+    Args:
+        coeffs (Tensor): Polynomial coefficients [num_coeffs], uint32
+        eval_points (Tensor): Evaluation points [num_points], uint32
+        num_coeffs (int): Number of coefficients
+        num_points (int): Number of evaluation points
+        poly_degree (int): Polynomial degree
+
+    Returns:
+        Tensor: Evaluations [num_points], uint32
+    """
+    return pearl_gemm_cuda.gpu_lde_eval(
+        coeffs, eval_points, num_coeffs, num_points, poly_degree
+    )
+
+
+def gpu_fri_fold(layer, challenges, layer_size):
+    """GPU-accelerated FRI folding.
+
+    Folds a layer of the FRI protocol using random challenges.
+
+    Args:
+        layer (Tensor): Input layer [layer_size], uint32
+        challenges (Tensor): Folding challenges [4], uint32
+        layer_size (int): Size of the input layer
+
+    Returns:
+        Tensor: Folded layer [layer_size/2], uint32
+    """
+    return pearl_gemm_cuda.gpu_fri_fold(
+        layer, challenges, layer_size
+    )
+
+
+def gpu_merkle_hash(leaves, num_leaves):
+    """GPU-accelerated Merkle tree hashing.
+
+    Computes one level of a Merkle tree in parallel.
+
+    Args:
+        leaves (Tensor): Input leaves [num_leaves], uint32
+        num_leaves (int): Number of leaves
+
+    Returns:
+        Tensor: Parent nodes [num_leaves/2], uint32
+    """
+    return pearl_gemm_cuda.gpu_merkle_hash(
+        leaves, num_leaves
     )
 
 

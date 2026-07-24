@@ -16,7 +16,7 @@ pub use blake3::{
     BLOCK_LEN as BLAKE3_MSG_LEN, CHUNK_LEN as BLAKE3_CHUNK_LEN, OUT_LEN as BLAKE3_DIGEST_SIZE,
 };
 pub use hasher::{
-    blake3_digest, Blake3Hasher, B3F_CHUNK_END, B3F_CHUNK_START, B3F_KEYED_HASH, B3F_PARENT,
+    blake3_digest, hash_batch, Blake3Hasher, B3F_CHUNK_END, B3F_CHUNK_START, B3F_KEYED_HASH, B3F_PARENT,
     B3F_ROOT,
 };
 pub use merkle::{pad_to_chunk_boundary, padded_chunk_len, MerkleProof, MerkleTree};
