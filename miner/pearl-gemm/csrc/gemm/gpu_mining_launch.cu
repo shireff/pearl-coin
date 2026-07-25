@@ -37,5 +37,22 @@ void launch_gpu_mining(
     );
 }
 
+void launch_gpu_jackpot_hash(
+    const uint32_t* jackpots,
+    const uint32_t* keys,
+    uint32_t* hashes,
+    uint32_t num_candidates,
+    uint32_t num_combos,
+    cudaStream_t stream) {
+
+    const uint32_t total = num_candidates * num_combos;
+    const int threads = 256;
+    const int blocks = (total + threads - 1) / threads;
+
+    gpu_jackpot_hash_kernel<<<blocks, threads, 0, stream>>>(
+        jackpots, keys, hashes, num_candidates, num_combos
+    );
+}
+
 } // namespace mining
 } // namespace pearl

@@ -33,6 +33,10 @@ system, vLLM miner, and supporting tools.
 | [`apps/`](apps/) | Frontend applications (website, desktop wallet — pnpm/Turborepo) |
 | [`tools/`](tools/) | Go development tool dependencies |
 
+## Mining Guide
+
+For a complete step-by-step guide to setting up and running the Pearl miner, see **[MINING_GUIDE.md](MINING_GUIDE.md)**. It covers repository cloning, tool installation, wallet and node setup, GPU miner configuration, performance tuning, and troubleshooting.
+
 ## Install (prebuilt binaries)
 
 macOS / Linux:

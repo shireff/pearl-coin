@@ -1,5 +1,7 @@
 use std::env;
 use std::path::PathBuf;
+
+#[cfg(feature = "gpu_prove")]
 use std::process::Command;
 
 fn main() {

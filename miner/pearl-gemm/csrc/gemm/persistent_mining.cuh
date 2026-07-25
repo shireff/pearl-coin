@@ -38,5 +38,14 @@ void launch_persistent_mining(
     uint32_t num_jobs,
     cudaStream_t stream);
 
+// Persistent pipeline API
+struct PersistentPipelineState;
+
+PersistentPipelineState* create_persistent_pipeline(uint32_t max_jackpots);
+void destroy_persistent_pipeline(PersistentPipelineState* state);
+cudaError_t pipeline_enqueue_jobs(PersistentPipelineState* state, const PersistentJob* jobs, uint32_t num_jobs);
+cudaError_t pipeline_wait_for_completion(PersistentPipelineState* state);
+cudaError_t pipeline_get_results(PersistentPipelineState* state, uint32_t* results, uint32_t num_jobs);
+
 } // namespace persistent
 } // namespace pearl

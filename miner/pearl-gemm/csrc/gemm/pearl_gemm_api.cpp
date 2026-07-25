@@ -30,6 +30,8 @@
 #include <optional>
 
 #include <iostream>
+#include "../blake3/blake3.cuh"
+#include "persistent_pipeline.cuh"
 
 namespace PYBIND11_NAMESPACE {
 namespace detail {
@@ -1191,6 +1193,41 @@ at::Tensor inner_hash(at::Tensor input_buffer, int64_t iterations) {
   return output;
 }
 
+// Simple kernel to launch blake3_keyed_hash for a batch of messages
+__global__ void blake3_keyed_hash_kernel(const uint32_t* messages, const uint32_t* key, uint32_t* outputs, int num_hashes) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < num_hashes) {
+    blake3::blake3_keyed_hash(messages + idx * 16, key, outputs + idx * 8);
+  }
+}
+
+at::Tensor blake3_keyed_hash(at::Tensor messages, at::Tensor key) {
+  CHECK_DEVICE(messages);
+  CHECK_DEVICE(key);
+  CHECK_CONTIGUOUS(messages);
+  CHECK_CONTIGUOUS(key);
+
+  TORCH_CHECK(messages.dtype() == torch::kUInt32, "messages must be uint32 tensor");
+  TORCH_CHECK(key.dtype() == torch::kUInt32, "key must be uint32 tensor");
+  TORCH_CHECK(messages.dim() == 2, "messages must be 2D tensor (num_hashes, 16)");
+  TORCH_CHECK(key.dim() == 1, "key must be 1D tensor (8)");
+  TORCH_CHECK(messages.size(1) == 16, "messages must have 16 uint32s per hash");
+  TORCH_CHECK(key.size(0) == 8, "key must have 8 uint32s");
+
+  int num_hashes = messages.size(0);
+  at::cuda::CUDAGuard device_guard{(char)messages.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto outputs = torch::empty({num_hashes, 8}, messages.options());
+
+  int threads = 256;
+  int blocks = (num_hashes + threads - 1) / threads;
+  blake3_keyed_hash_kernel<<<blocks, threads, 0, stream>>>(messages.data_ptr<uint32_t>(), key.data_ptr<uint32_t>(), outputs.data_ptr<uint32_t>(), num_hashes);
+
+  cudaStreamSynchronize(stream);
+  return outputs;
+}
+
 at::Tensor gpu_mine_batch(
     at::Tensor a_noised,      // num_jobs x m x k, int32
     at::Tensor b_noised_t,    // num_jobs x n x k, int32
@@ -1247,6 +1284,189 @@ at::Tensor gpu_mine_batch(
   return jackpots;
 }
 
+at::Tensor gpu_jackpot_hash(
+    at::Tensor jackpots,  // num_jobs x num_combos x 16, uint32
+    at::Tensor keys) {     // num_jobs x 8, uint32
+  CHECK_DEVICE(jackpots);
+  CHECK_DEVICE(keys);
+  CHECK_CONTIGUOUS(jackpots);
+  CHECK_CONTIGUOUS(keys);
+
+  TORCH_CHECK(jackpots.dtype() == torch::kUInt32, "jackpots must be uint32 tensor");
+  TORCH_CHECK(keys.dtype() == torch::kUInt32, "keys must be uint32 tensor");
+  TORCH_CHECK(jackpots.dim() == 3, "jackpots must be 3D tensor (num_jobs, num_combos, 16)");
+  TORCH_CHECK(keys.dim() == 2, "keys must be 2D tensor (num_jobs, 8)");
+
+  int num_jobs = jackpots.size(0);
+  int num_combos = jackpots.size(1);
+
+  at::cuda::CUDAGuard device_guard{(char)jackpots.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  auto hashes = torch::empty({num_jobs, num_combos, 8}, jackpots.options());
+
+  pearl::mining::launch_gpu_jackpot_hash(
+      jackpots.data_ptr<uint32_t>(),
+      keys.data_ptr<uint32_t>(),
+      hashes.data_ptr<uint32_t>(),
+      static_cast<uint32_t>(num_jobs),
+      static_cast<uint32_t>(num_combos),
+      stream);
+
+  cudaStreamSynchronize(stream);
+  return hashes;
+}
+
+// CUDA Graph API for batch mining
+
+ MiningGraphState* create_mining_graph_state(uint32_t num_candidates, uint32_t num_combos,
+                                             uint32_t tile_h, uint32_t tile_w,
+                                             uint32_t m, uint32_t n, uint32_t k, uint32_t rank) {
+    size_t shared_mem_bytes = (tile_h * tile_w + JACKPOT_SIZE) * sizeof(int32_t);
+    MiningGraphState* state = new MiningGraphState();
+    if (state == nullptr) return nullptr;
+
+    cudaError_t err = pearl::mining::create_mining_graph(state, num_candidates, num_combos,
+                                                         tile_h, tile_w, m, n, k, rank, shared_mem_bytes);
+    if (err != cudaSuccess) {
+        delete state;
+        return nullptr;
+    }
+
+    return state;
+}
+
+void destroy_mining_graph_state(MiningGraphState* state) {
+    if (state == nullptr) return;
+    pearl::mining::destroy_mining_graph(state);
+    delete state;
+}
+
+cudaError_t update_mining_graph_state(MiningGraphState* state, uint32_t num_candidates, uint32_t num_combos,
+                                      uint32_t tile_h, uint32_t tile_w,
+                                      uint32_t m, uint32_t n, uint32_t k, uint32_t rank) {
+    if (state == nullptr) return cudaErrorInvalidValue;
+    size_t shared_mem_bytes = (tile_h * tile_w + JACKPOT_SIZE) * sizeof(int32_t);
+    return pearl::mining::update_mining_graph(state, num_candidates, num_combos,
+                                              tile_h, tile_w, m, n, k, rank, shared_mem_bytes);
+}
+
+cudaError_t launch_mining_graph_state(MiningGraphState* state,
+                                      at::Tensor a_noised, at::Tensor b_noised_t,
+                                      at::Tensor a_rows, at::Tensor b_cols,
+                                      at::Tensor jobs, at::Tensor jackpots,
+                                      at::Tensor keys, at::Tensor hashes) {
+    if (state == nullptr) return cudaErrorInvalidValue;
+
+    CHECK_DEVICE(a_noised);
+    CHECK_DEVICE(b_noised_t);
+    CHECK_DEVICE(a_rows);
+    CHECK_DEVICE(b_cols);
+    CHECK_DEVICE(jobs);
+    CHECK_DEVICE(jackpots);
+    CHECK_DEVICE(keys);
+    CHECK_DEVICE(hashes);
+
+    return pearl::mining::launch_mining_graph(
+        state,
+        a_noised.data_ptr<int32_t>(),
+        b_noised_t.data_ptr<int32_t>(),
+        a_rows.data_ptr<int32_t>(),
+        b_cols.data_ptr<int32_t>(),
+        jobs.data_ptr<uint8_t>(),
+        jackpots.data_ptr<uint32_t>(),
+        keys.data_ptr<uint32_t>(),
+        hashes.data_ptr<uint32_t>()
+    );
+}
+
+cudaError_t synchronize_mining_graph_state(MiningGraphState* state) {
+    if (state == nullptr) return cudaErrorInvalidValue;
+    return pearl::mining::synchronize_mining_graph(state);
+}
+
+// Persistent Pipeline API
+
+PersistentPipelineState* create_persistent_pipeline_api(uint32_t max_jackpots) {
+    return pearl::persistent::create_persistent_pipeline(max_jackpots);
+}
+
+void destroy_persistent_pipeline_api(PersistentPipelineState* state) {
+    pearl::persistent::destroy_persistent_pipeline(state);
+}
+
+cudaError_t pipeline_set_buffers_api(
+    PersistentPipelineState* state,
+    at::Tensor a_noised,
+    at::Tensor b_noised_t,
+    at::Tensor a_rows,
+    at::Tensor b_cols
+) {
+    CHECK_DEVICE(a_noised);
+    CHECK_DEVICE(b_noised_t);
+    CHECK_DEVICE(a_rows);
+    CHECK_DEVICE(b_cols);
+
+    return pearl::persistent::pipeline_set_buffers(
+        state,
+        a_noised.data_ptr<int32_t>(),
+        b_noised_t.data_ptr<int32_t>(),
+        a_rows.data_ptr<int32_t>(),
+        b_cols.data_ptr<int32_t>()
+    );
+}
+
+cudaError_t pipeline_enqueue_jobs_api(
+    PersistentPipelineState* state,
+    at::Tensor jobs,
+    uint64_t num_jobs
+) {
+    CHECK_DEVICE(jobs);
+    CHECK_CONTIGUOUS(jobs);
+
+    return pearl::persistent::pipeline_enqueue_jobs(
+        state,
+        reinterpret_cast<pearl::persistent::PersistentJob*>(jobs.data_ptr()),
+        static_cast<uint32_t>(num_jobs)
+    );
+}
+
+cudaError_t pipeline_wait_for_completion_api(PersistentPipelineState* state) {
+    return pearl::persistent::pipeline_wait_for_completion(state);
+}
+
+cudaError_t pipeline_get_jackpots_api(
+    PersistentPipelineState* state,
+    uint64_t* size
+) {
+    uint32_t* jackpots;
+    size_t sz;
+    cudaError_t err = pearl::persistent::pipeline_get_jackpots(state, &jackpots, &sz);
+    if (err != cudaSuccess) return err;
+    *size = sz;
+    return cudaSuccess;
+}
+
+cudaError_t pipeline_get_hashes_api(
+    PersistentPipelineState* state,
+    uint64_t* size
+) {
+    uint32_t* hashes;
+    size_t sz;
+    cudaError_t err = pearl::persistent::pipeline_get_hashes(state, &hashes, &sz);
+    if (err != cudaSuccess) return err;
+    *size = sz;
+    return cudaSuccess;
+}
+
+void launch_persistent_worker_api(PersistentPipelineState* state) {
+    pearl::persistent::launch_persistent_worker(state);
+}
+
+cudaError_t stop_persistent_worker_api(PersistentPipelineState* state) {
+    return pearl::persistent::stop_persistent_worker(state);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Pearl GEMM with noising/denoising and PoW extraction";
   m.def("denoise_converter", &denoise_converter,
@@ -1271,6 +1491,58 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("b_cols_data"), py::arg("jobs"), py::arg("num_jobs"),
         py::arg("P"), py::arg("Q"), py::arg("tile_h"), py::arg("tile_w"),
         py::arg("m"), py::arg("n"), py::arg("k"), py::arg("rank"));
+  m.def("gpu_jackpot_hash", &gpu_jackpot_hash,
+        "GPU BLAKE3 keyed hash for jackpot arrays",
+        py::arg("jackpots"), py::arg("keys"));
+  m.def("create_mining_graph", &create_mining_graph_state,
+        "Create CUDA Graph for batch mining",
+        py::arg("num_candidates"), py::arg("num_combos"),
+        py::arg("tile_h"), py::arg("tile_w"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("rank"));
+  m.def("destroy_mining_graph", &destroy_mining_graph_state,
+        "Destroy CUDA Graph for batch mining",
+        py::arg("state"));
+  m.def("update_mining_graph", &update_mining_graph_state,
+        "Update CUDA Graph with new parameters",
+        py::arg("state"), py::arg("num_candidates"), py::arg("num_combos"),
+        py::arg("tile_h"), py::arg("tile_w"),
+        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("rank"));
+  m.def("launch_mining_graph", &launch_mining_graph_state,
+        "Launch pre-captured CUDA Graph for batch mining",
+        py::arg("state"), py::arg("a_noised"), py::arg("b_noised_t"),
+        py::arg("a_rows"), py::arg("b_cols"), py::arg("jobs"),
+        py::arg("jackpots"), py::arg("keys"), py::arg("hashes"));
+  m.def("synchronize_mining_graph", &synchronize_mining_graph_state,
+        "Synchronize CUDA Graph completion",
+        py::arg("state"));
+  m.def("create_persistent_pipeline", &create_persistent_pipeline_api,
+        "Create persistent GPU mining pipeline",
+        py::arg("max_jackpots"));
+  m.def("destroy_persistent_pipeline", &destroy_persistent_pipeline_api,
+        "Destroy persistent GPU mining pipeline",
+        py::arg("state"));
+  m.def("pipeline_set_buffers", &pipeline_set_buffers_api,
+        "Set global data buffers for persistent pipeline",
+        py::arg("state"), py::arg("a_noised"), py::arg("b_noised_t"),
+        py::arg("a_rows"), py::arg("b_cols"));
+  m.def("pipeline_enqueue_jobs", &pipeline_enqueue_jobs_api,
+        "Enqueue jobs for persistent pipeline",
+        py::arg("state"), py::arg("jobs"), py::arg("num_jobs"));
+  m.def("pipeline_wait_for_completion", &pipeline_wait_for_completion_api,
+        "Wait for all queued jobs to complete",
+        py::arg("state"));
+  m.def("pipeline_get_jackpots_size", &pipeline_get_jackpots_api,
+        "Get jackpot buffer size",
+        py::arg("state"), py::arg("size"));
+  m.def("pipeline_get_hashes_size", &pipeline_get_hashes_api,
+        "Get hash buffer size",
+        py::arg("state"), py::arg("size"));
+  m.def("launch_persistent_worker", &launch_persistent_worker_api,
+        "Launch persistent GPU worker kernel",
+        py::arg("state"));
+  m.def("stop_persistent_worker", &stop_persistent_worker_api,
+        "Stop persistent GPU worker kernel",
+        py::arg("state"));
   m.def("tensor_hash", &run_tensor_hash,
         "CUDA hash function with configurable kernel parameters",
         py::arg("data"), py::arg("key"), py::arg("out"), py::arg("roots"),
@@ -1484,10 +1756,12 @@ TORCH_LIBRARY(pearl_gemm, m) {
       {at::Tag::pt2_compliant_tag});
 
   m.def("inner_hash(Tensor input_buffer, int iterations = 1) -> Tensor");
+  m.def("blake3_keyed_hash(Tensor messages, Tensor key) -> Tensor");
   m.def("evaluate_jackpot_tile(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, int rank) -> (Tensor, Tensor)");
   m.def("fused_evaluate_accumulate_jackpot(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, int rank) -> Tensor");
   m.def("launch_persistent_mining(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, Tensor jobs, int num_jobs) -> ()");
   m.def("tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
+  m.def("gpu_jackpot_hash(Tensor jackpots, Tensor keys) -> Tensor");
   m.def("gpu_lde_eval(Tensor coeffs, Tensor eval_points, int num_coeffs, int num_points, int poly_degree) -> Tensor");
   m.def("gpu_fri_fold(Tensor layer, Tensor challenges, int layer_size) -> Tensor");
   m.def("gpu_merkle_hash(Tensor leaves, int num_leaves) -> Tensor");
@@ -1520,10 +1794,12 @@ TORCH_LIBRARY_IMPL(pearl_gemm, CUDA, m) {
   m.impl("denoise_converter", &denoise_converter);
   m.impl("noise_gen", &noise_gen);
   m.impl("inner_hash", &inner_hash);
+  m.impl("blake3_keyed_hash", &blake3_keyed_hash);
   m.impl("evaluate_jackpot_tile", &evaluate_jackpot_tile);
   m.impl("fused_evaluate_accumulate_jackpot", &fused_evaluate_accumulate_jackpot);
   m.impl("launch_persistent_mining", &launch_persistent_mining);
   m.impl("tensor_hash", &run_tensor_hash);
+  m.impl("gpu_jackpot_hash", &gpu_jackpot_hash);
   m.impl("gpu_lde_eval", &run_gpu_lde_eval);
   m.impl("gpu_fri_fold", &run_gpu_fri_fold);
   m.impl("gpu_merkle_hash", &run_gpu_merkle_hash);

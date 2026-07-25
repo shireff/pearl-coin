@@ -1,7 +1,7 @@
 //! Benchmarks for GPU-accelerated STARK proving operations.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use zk_pow::api::gpu_stark_prover::GpuStarkProver;
+use zk_pow::gpu_stark_prover::GpuStarkProver;
 
 fn bench_gpu_lde_eval(c: &mut Criterion) {
     let prover = GpuStarkProver::new(true);

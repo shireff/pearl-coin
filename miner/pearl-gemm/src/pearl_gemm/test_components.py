@@ -14,6 +14,43 @@ if _VLLM_AVAILABLE:
     from vllm import _custom_ops as vllm_ops
 
 
+def gpu_jackpot_hash(jackpots: torch.Tensor, keys: torch.Tensor) -> torch.Tensor:
+    """
+    Compute BLAKE3 keyed hashes for jackpot arrays on GPU.
+
+    This function computes blake3(jackpot, key) for each jackpot array,
+    using the fixed CUDA BLAKE3 keyed-hash implementation.
+
+    Args:
+        jackpots (torch.Tensor): 3D tensor of uint32 jackpot arrays,
+            shape (num_jobs, num_combos, 16), device: CUDA
+        keys (torch.Tensor): 2D tensor of uint32 keys,
+            shape (num_jobs, 8), device: CUDA
+
+    Returns:
+        torch.Tensor: 3D tensor of uint32 hashes,
+            shape (num_jobs, num_combos, 8), device: CUDA
+    """
+    return torch.ops.pearl_gemm.gpu_jackpot_hash(jackpots, keys)
+
+
+def blake3_keyed_hash(messages: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+    """
+    Compute single-block BLAKE3 keyed hash on GPU.
+
+    This function computes blake3(msg, key) for each 64-byte message block,
+    matching the CPU blake3 crate's keyed hash mode.
+
+    Args:
+        messages (torch.Tensor): 2D tensor of uint32 messages, shape (N, 16), device: CUDA
+        key (torch.Tensor): 1D tensor of uint32 key, shape (8,), device: CUDA
+
+    Returns:
+        torch.Tensor: 2D tensor of uint32 outputs, shape (N, 8), device: CUDA
+    """
+    return torch.ops.pearl_gemm.blake3_keyed_hash(messages, key)
+
+
 def inner_hash(input_buffer: torch.Tensor, iterations: int = 1) -> torch.Tensor:
     """
     Compute the inner hash of a uint32 buffer.
@@ -110,6 +147,8 @@ def vllm_gemm(A, B_t, scale_a, scale_b, out_dtype=torch.bfloat16):
 
 # Make the main function available at module level
 __all__ = [
+    "gpu_jackpot_hash",
+    "blake3_keyed_hash",
     "inner_hash",
     "tensor_hash",
     "commitment_hash_from_merkle_roots",

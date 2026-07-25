@@ -54,5 +54,13 @@ void launch_gpu_mining(
     uint32_t max_tile_w,
     cudaStream_t stream);
 
+void launch_gpu_jackpot_hash(
+    const uint32_t* jackpots,
+    const uint32_t* keys,
+    uint32_t* hashes,
+    uint32_t num_candidates,
+    uint32_t num_combos,
+    cudaStream_t stream);
+
 } // namespace mining
 } // namespace pearl

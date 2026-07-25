@@ -269,7 +269,7 @@ impl GpuStarkProver {
         Ok(proof)
     }
 
-    fn prove_gpu(
+    pub fn prove_gpu(
         &self,
         trace: &[Vec<u32>],
         public_inputs: &[u32],

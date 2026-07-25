@@ -167,6 +167,8 @@ u32 rightrotate32(u32 x, u32 n) {
 }
 
 // Compress a 64-byte message block
+// For keyed hashes (params.flags & KEYED_HASH), state[8..11] must be 0, not IV.
+// For non-keyed hashes, state[8..11] = IV0..IV3 per the BLAKE3 spec.
 template <class RmemTensorBlock, class RmemTensorChainingValue>
 CUTLASS_DEVICE void compress_msg_block_u32(
     RmemTensorBlock const& block, RmemTensorChainingValue& chaining_value,
@@ -177,10 +179,17 @@ CUTLASS_DEVICE void compress_msg_block_u32(
   copy(block, rBlock);
   // Initialize state
   copy(chaining_value, rState);
-  rState(8) = IV0;
-  rState(9) = IV1;
-  rState(10) = IV2;
-  rState(11) = IV3;
+  if (params.flags & KEYED_HASH) {
+    rState(8) = 0;
+    rState(9) = 0;
+    rState(10) = 0;
+    rState(11) = 0;
+  } else {
+    rState(8) = IV0;
+    rState(9) = IV1;
+    rState(10) = IV2;
+    rState(11) = IV3;
+  }
   rState(12) = params.counter;
   rState(13) = params.counter >> 32;
   rState(14) = params.block_len;
@@ -205,4 +214,15 @@ CUTLASS_DEVICE void compress_msg_block_u32(
   chaining_value(6) = rState(6) ^ rState(14);
   chaining_value(7) = rState(7) ^ rState(15);
 }
+
+// Single-block keyed BLAKE3 hash: blake3(msg, key) for a 64-byte message.
+// Output is 32 bytes. This matches blake3_digest(&msg, Some(key)) from the CPU.
+CUTLASS_DEVICE void blake3_keyed_hash(const uint32_t* msg, const uint32_t* key, uint32_t* output) {
+  Tensor data = make_tensor(make_gmem_ptr(msg), Int<blake3::MSG_BLOCK_SIZE_U32>{});
+  Tensor chaining_value = make_tensor(make_gmem_ptr(key), Int<blake3::CHAINING_VALUE_SIZE_U32>{});
+  Tensor out = make_tensor(make_gmem_ptr(output), Int<blake3::CHAINING_VALUE_SIZE_U32>{});
+  copy(chaining_value, out);
+  blake3::compress_msg_block_u32(data, out, blake3::COMPRESS_PARAMS_SINGLE_BLOCK_KEYED);
+}
+
 }  // namespace blake3

@@ -109,5 +109,26 @@ __global__ void gpu_mining_kernel(
     }
 }
 
+__global__ void gpu_jackpot_hash_kernel(
+    const uint32_t* __restrict__ d_jackpots,
+    const uint32_t* __restrict__ d_keys,
+    uint32_t* __restrict__ d_hashes,
+    uint32_t num_candidates,
+    uint32_t num_combos
+) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = num_candidates * num_combos;
+    if (idx >= total) return;
+
+    const uint32_t cid = idx / num_combos;
+    const uint32_t combo = idx % num_combos;
+
+    const uint32_t* jackpot = d_jackpots + cid * num_combos * 16 + combo * 16;
+    const uint32_t* key = d_keys + cid * 8;
+    uint32_t* output = d_hashes + cid * num_combos * 8 + combo * 8;
+
+    blake3::blake3_keyed_hash(jackpot, key, output);
+}
+
 } // namespace mining
 } // namespace pearl

@@ -11,3 +11,6 @@ pub mod gpu_stark_prover;
 
 #[cfg(feature = "gpu_prove")]
 pub mod gpu_mining;
+
+#[cfg(feature = "gpu_prove")]
+pub mod persistent_gpu_mining;

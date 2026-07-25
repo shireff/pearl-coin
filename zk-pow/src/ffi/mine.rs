@@ -4,7 +4,6 @@ use anyhow::Result;
 use primitive_types::U256;
 use rand::Rng;
 use rayon::prelude::*;
-use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -16,10 +15,27 @@ use crate::circuit::pearl_program::{JACKPOT_SIZE, LROT_PER_TILE};
 use crate::ffi::plain_proof::{MatrixMerkleProof, MoEProofParams, PlainProof};
 use pearl_blake3::{blake3_digest, hash_batch};
 
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+use pyo3::prelude::*;
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+use rand::rngs::StdRng;
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+use rand::SeedableRng;
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+use std::mem;
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+use crate::api::proof::Hash256;
+
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+use crate::gpu_mining::gpu_jackpot_hash;
+
 const SIGNAL_MIN: i8 = -64;
 const SIGNAL_MAX: i8 = 64;
+
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 const GPU_BATCH_SIZE: usize = 256;
 
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 #[repr(C, align(16))]
 struct MiningJob {
     status: u32,
@@ -53,22 +69,21 @@ pub fn try_mine_one<R: Rng>(
     signal_range: Option<(i8, i8)>,
     wrong_jackpot_hash: bool,
 ) -> Result<Option<PlainProof>> {
-    let rank = config.rank as usize;
     let (signal_min, signal_max) = signal_range.unwrap_or((SIGNAL_MIN, SIGNAL_MAX));
 
     let a_rows_list = threads_partition(&config.rows_pattern, m);
     let b_cols_list = threads_partition(&config.cols_pattern, n);
 
-    let tile_h = a_rows_list.first().map(|a| a.len()).unwrap_or(0);
-    let tile_w = b_cols_list.first().map(|b| b.len()).unwrap_or(0);
-    let P = a_rows_list.len();
-    let Q = b_cols_list.len();
-
     #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
     {
+        let tile_h = a_rows_list.first().map(|a| a.len()).unwrap_or(0);
+        let tile_w = b_cols_list.first().map(|b| b.len()).unwrap_or(0);
+        let P = a_rows_list.len();
+        let Q = b_cols_list.len();
+
         let _ = signal_min;
         let _ = signal_max;
-        return try_mine_one_gpu_batch(
+        return try_mine_one_gpu_batch_graph(
             rng, m, n, k, header, config,
             &a_rows_list, &b_cols_list, tile_h, tile_w, P, Q, wrong_jackpot_hash
         );
@@ -76,6 +91,7 @@ pub fn try_mine_one<R: Rng>(
 
     #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
     {
+        let rank = config.rank as usize;
         let a_matrix: Vec<i8> = (0..m * k).map(|_| rng.random_range(signal_min..=signal_max)).collect();
         let b_matrix: Vec<i8> = (0..k * n).map(|_| rng.random_range(signal_min..=signal_max)).collect();
 
@@ -123,7 +139,7 @@ pub fn try_mine_one<R: Rng>(
 #[allow(clippy::too_many_arguments)]
 #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 fn try_mine_one_gpu_batch<R: Rng>(
-    rng: &mut R,
+    _rng: &mut R,
     m: usize,
     n: usize,
     k: usize,
@@ -138,7 +154,6 @@ fn try_mine_one_gpu_batch<R: Rng>(
     wrong_jackpot_hash: bool,
 ) -> Result<Option<PlainProof>> {
     use crate::gpu_mining::gpu_mine_batch;
-    use std::mem;
 
     let rank = config.rank as usize;
     let signal_min = SIGNAL_MIN;
@@ -146,48 +161,66 @@ fn try_mine_one_gpu_batch<R: Rng>(
 
     let batch_size = GPU_BATCH_SIZE;
 
+    let job_key = compute_job_key(&header, &config);
+
+    let a_rows_data: Vec<i32> = a_rows_list.iter().flatten().map(|&x| x as i32).collect();
+    let b_cols_data: Vec<i32> = b_cols_list.iter().flatten().map(|&x| x as i32).collect();
+
+    let a_all_rows: Vec<usize> = (0..m).collect();
+    let b_all_cols: Vec<usize> = (0..n).collect();
+
+    let mut all_a_noised = Vec::with_capacity(batch_size * m * k);
+    let mut all_b_noised_t = Vec::with_capacity(batch_size * n * k);
+    let mut all_jobs = Vec::with_capacity(batch_size * mem::size_of::<MiningJob>());
+    let mut candidate_seeds = Vec::with_capacity(batch_size);
+
+    let mut a_matrix_buf = vec![0i8; m * k];
+    let mut b_matrix_buf = vec![0i8; k * n];
+    let mut b_transposed_buf = vec![0i8; n * k];
+    let mut a_noised_buf = vec![0i32; m * k];
+    let mut b_noised_buf = vec![0i32; k * n];
+    let mut b_noised_t_buf = vec![0i32; n * k];
+
     for candidate_idx in 0..batch_size {
-        let a_matrix: Vec<i8> = (0..m * k).map(|_| rng.random_range(signal_min..=signal_max)).collect();
-        let b_matrix: Vec<i8> = (0..k * n).map(|_| rng.random_range(signal_min..=signal_max)).collect();
+        let mut candidate_rng = StdRng::seed_from_u64(candidate_idx as u64);
 
-        let b_transposed: Vec<i8> = (0..n * k)
-            .map(|idx| {
-                let i = idx / k;
-                let j = idx % k;
-                b_matrix[j * n + i]
-            })
-            .collect();
+        for val in a_matrix_buf.iter_mut() {
+            *val = candidate_rng.random_range(signal_min..=signal_max) as i8;
+        }
+        for val in b_matrix_buf.iter_mut() {
+            *val = candidate_rng.random_range(signal_min..=signal_max) as i8;
+        }
 
-        let job_key = compute_job_key(&header, &config);
+        for idx in 0..n * k {
+            let i = idx / k;
+            let j = idx % k;
+            b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+        }
 
-        let a_row_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&a_matrix));
-        let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed));
+        let a_row_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&a_matrix_buf));
+        let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed_buf));
         let (b_noise_seed, a_noise_seed) = compute_commitment_hash(&job_key, &a_row_major, &b_col_major);
 
-        let a_all_rows: Vec<usize> = (0..m).collect();
-        let b_all_cols: Vec<usize> = (0..n).collect();
         let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
 
-        let a_noised: Vec<i32> = (0..m * k)
-            .map(|idx| a_matrix[idx] as i32 + noise.a[idx / k][idx % k] as i32)
-            .collect();
+        for idx in 0..m * k {
+            a_noised_buf[idx] = a_matrix_buf[idx] as i32 + noise.a[idx / k][idx % k] as i32;
+        }
+        for idx in 0..k * n {
+            b_noised_buf[idx] = b_matrix_buf[idx] as i32 + noise.b[idx % n][idx / n] as i32;
+        }
+        for idx in 0..n * k {
+            let i = idx / k;
+            let j = idx % k;
+            b_noised_t_buf[idx] = b_noised_buf[j * n + i];
+        }
 
-        let b_noised: Vec<i32> = (0..k * n)
-            .map(|idx| b_matrix[idx] as i32 + noise.b[idx % n][idx / n] as i32)
-            .collect();
+        all_a_noised.extend_from_slice(&a_noised_buf);
+        all_b_noised_t.extend_from_slice(&b_noised_t_buf);
 
-        let b_noised_t: Vec<i32> = (0..n * k)
-            .map(|idx| {
-                let i = idx / k;
-                let j = idx % k;
-                b_noised[j * n + i]
-            })
-            .collect();
-
-        let mut jobs = Vec::with_capacity(1);
         let mut job = [0u8; mem::size_of::<MiningJob>()];
         write_u32_le(&mut job, 0, 0); // status
-        write_u32_le(&mut job, 4, 0); // candidate_id
+        write_u32_le(&mut job, 4, candidate_idx as u32); // candidate_id
         write_u32_le(&mut job, 8, m as u32);
         write_u32_le(&mut job, 12, n as u32);
         write_u32_le(&mut job, 16, k as u32);
@@ -206,41 +239,547 @@ fn try_mine_one_gpu_batch<R: Rng>(
         }
         write_u32_le(&mut job, 92, u32::from_le_bytes(a_noise_seed[0..4].try_into().unwrap()));
         write_u32_le(&mut job, 96, u32::from_le_bytes(b_noise_seed[0..4].try_into().unwrap()));
-        jobs.extend_from_slice(&job);
+        all_jobs.extend_from_slice(&job);
 
-        let a_rows_data: Vec<i32> = a_rows_list.iter().flatten().map(|&x| x as i32).collect();
-        let b_cols_data: Vec<i32> = b_cols_list.iter().flatten().map(|&x| x as i32).collect();
+        candidate_seeds.push(a_noise_seed);
+    }
 
-        let jackpots = gpu_mine_batch(
-            &a_noised,
-            &b_noised_t,
-            &a_rows_data,
-            &b_cols_data,
-            &jobs,
-            1,
-            P as i64,
-            Q as i64,
-            tile_h as i64,
-            tile_w as i64,
-            m as i64,
-            n as i64,
-            k as i64,
-            rank as i64,
-        )?;
+    let all_jackpots = gpu_mine_batch(
+        &all_a_noised,
+        &all_b_noised_t,
+        &a_rows_data,
+        &b_cols_data,
+        &all_jobs,
+        batch_size as i64,
+        P as i64,
+        Q as i64,
+        tile_h as i64,
+        tile_w as i64,
+        m as i64,
+        n as i64,
+        k as i64,
+        rank as i64,
+    )?;
 
-        let num_combos = P * Q;
+    let num_combos = P * Q;
+    let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
+
+    #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+    {
+        let keys: Vec<u32> = candidate_seeds.iter().flat_map(|seed| {
+            seed.chunks(4).map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect::<Vec<u32>>()
+        }).collect();
+        let all_hashes = gpu_jackpot_hash(&all_jackpots, &keys, batch_size as i64, num_combos as i64)?;
+        for (candidate_idx, _a_noise_seed) in candidate_seeds.into_iter().enumerate() {
+            for combo in 0..num_combos {
+                let start = (candidate_idx * num_combos * 8 + combo * 8) as usize;
+                let jackpot_hash: Hash256 = all_hashes[start..start + 8]
+                    .iter()
+                    .flat_map(|&u| u.to_le_bytes())
+                    .collect::<Vec<u8>>()
+                    .try_into()
+                    .unwrap();
+                if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
+                    let a_rows = &a_rows_list[combo % P];
+                    let b_cols = &b_cols_list[combo / P];
+
+                    let mut winner_rng = StdRng::seed_from_u64(candidate_idx as u64);
+                    for val in a_matrix_buf.iter_mut() {
+                        *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                    }
+                    for val in b_matrix_buf.iter_mut() {
+                        *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                    }
+                    for idx in 0..n * k {
+                        let i = idx / k;
+                        let j = idx % k;
+                        b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+                    }
+
+                    let a_proof = build_matrix_proof(&a_matrix_buf, m, k, &job_key, a_rows);
+                    let b_proof = build_matrix_proof(&b_transposed_buf, n, k, &job_key, b_cols);
+
+                    let proof = PlainProof {
+                        m,
+                        n,
+                        k,
+                        noise_rank: rank,
+                        a: a_proof,
+                        bt: b_proof,
+                        moe: None,
+                    };
+
+                    return Ok(Some(proof));
+                }
+            }
+        }
+    }
+
+    #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
+    {
+        for (candidate_idx, _a_noise_seed) in candidate_seeds.into_iter().enumerate() {
+            for combo in 0..num_combos {
+                let start = (candidate_idx * num_combos * JACKPOT_SIZE + combo * JACKPOT_SIZE) as usize;
+                let jackpot_slice: [u32; JACKPOT_SIZE] = all_jackpots[start..start + JACKPOT_SIZE].try_into().unwrap();
+                let jackpot_hash = compute_jackpot_hash(&jackpot_slice, a_noise_seed);
+                if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
+                    let a_rows = &a_rows_list[combo % P];
+                    let b_cols = &b_cols_list[combo / P];
+
+                    let mut winner_rng = StdRng::seed_from_u64(candidate_idx as u64);
+                    for val in a_matrix_buf.iter_mut() {
+                        *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                    }
+                    for val in b_matrix_buf.iter_mut() {
+                        *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                    }
+                    for idx in 0..n * k {
+                        let i = idx / k;
+                        let j = idx % k;
+                        b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+                    }
+
+                    let a_proof = build_matrix_proof(&a_matrix_buf, m, k, &job_key, a_rows);
+                    let b_proof = build_matrix_proof(&b_transposed_buf, n, k, &job_key, b_cols);
+
+                    let proof = PlainProof {
+                        m,
+                        n,
+                        k,
+                        noise_rank: rank,
+                        a: a_proof,
+                        bt: b_proof,
+                        moe: None,
+                    };
+
+                    return Ok(Some(proof));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+fn try_mine_one_gpu_batch_persistent<R: Rng>(
+    _rng: &mut R,
+    m: usize,
+    n: usize,
+    k: usize,
+    header: IncompleteBlockHeader,
+    config: MiningConfiguration,
+    a_rows_list: &[Vec<usize>],
+    b_cols_list: &[Vec<usize>],
+    tile_h: usize,
+    tile_w: usize,
+    P: usize,
+    Q: usize,
+    wrong_jackpot_hash: bool,
+) -> Result<Option<PlainProof>> {
+    use crate::gpu_mining::gpu_mine_batch;
+    use crate::persistent_gpu_mining::PersistentGpuMiningSession;
+
+    let rank = config.rank as usize;
+    let signal_min = SIGNAL_MIN;
+    let signal_max = SIGNAL_MAX;
+
+    let batch_size = GPU_BATCH_SIZE;
+
+    let job_key = compute_job_key(&header, &config);
+
+    let a_rows_data: Vec<i32> = a_rows_list.iter().flatten().map(|&x| x as i32).collect();
+    let b_cols_data: Vec<i32> = b_cols_list.iter().flatten().map(|&x| x as i32).collect();
+
+    let a_all_rows: Vec<usize> = (0..m).collect();
+    let b_all_cols: Vec<usize> = (0..n).collect();
+
+    let mut all_a_noised = Vec::with_capacity(batch_size * m * k);
+    let mut all_b_noised_t = Vec::with_capacity(batch_size * n * k);
+    let mut all_jobs = Vec::with_capacity(batch_size * mem::size_of::<MiningJob>());
+    let mut candidate_seeds = Vec::with_capacity(batch_size);
+
+    let mut a_matrix_buf = vec![0i8; m * k];
+    let mut b_matrix_buf = vec![0i8; k * n];
+    let mut b_transposed_buf = vec![0i8; n * k];
+    let mut a_noised_buf = vec![0i32; m * k];
+    let mut b_noised_buf = vec![0i32; k * n];
+    let mut b_noised_t_buf = vec![0i32; n * k];
+
+    for candidate_idx in 0..batch_size {
+        let mut candidate_rng = StdRng::seed_from_u64(candidate_idx as u64);
+
+        for val in a_matrix_buf.iter_mut() {
+            *val = candidate_rng.random_range(signal_min..=signal_max) as i8;
+        }
+        for val in b_matrix_buf.iter_mut() {
+            *val = candidate_rng.random_range(signal_min..=signal_max) as i8;
+        }
+
+        for idx in 0..n * k {
+            let i = idx / k;
+            let j = idx % k;
+            b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+        }
+
+        let a_row_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&a_matrix_buf));
+        let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed_buf));
+        let (b_noise_seed, a_noise_seed) = compute_commitment_hash(&job_key, &a_row_major, &b_col_major);
+
+        let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
+
+        for idx in 0..m * k {
+            a_noised_buf[idx] = a_matrix_buf[idx] as i32 + noise.a[idx / k][idx % k] as i32;
+        }
+        for idx in 0..k * n {
+            b_noised_buf[idx] = b_matrix_buf[idx] as i32 + noise.b[idx % n][idx / n] as i32;
+        }
+        for idx in 0..n * k {
+            let i = idx / k;
+            let j = idx % k;
+            b_noised_t_buf[idx] = b_noised_buf[j * n + i];
+        }
+
+        all_a_noised.extend_from_slice(&a_noised_buf);
+        all_b_noised_t.extend_from_slice(&b_noised_t_buf);
+
+        let mut job = [0u8; mem::size_of::<MiningJob>()];
+        write_u32_le(&mut job, 0, 0); // status
+        write_u32_le(&mut job, 4, candidate_idx as u32); // candidate_id
+        write_u32_le(&mut job, 8, m as u32);
+        write_u32_le(&mut job, 12, n as u32);
+        write_u32_le(&mut job, 16, k as u32);
+        write_u32_le(&mut job, 20, rank as u32);
+        write_u32_le(&mut job, 24, tile_h as u32);
+        write_u32_le(&mut job, 28, tile_w as u32);
+        write_u32_le(&mut job, 32, (P * Q) as u32);
+        write_u32_le(&mut job, 36, 0); // a_offset
+        write_u32_le(&mut job, 40, 0); // b_offset
+        write_u32_le(&mut job, 44, 0); // a_rows_offset
+        write_u32_le(&mut job, 48, 0); // b_cols_offset
+        write_u32_le(&mut job, 52, 0); // jackpot_offset
+        write_u32_le(&mut job, 56, 0); // result_offset
+        for i in 0..8 {
+            write_u32_le(&mut job, 60 + i * 4, 0xFFFFFFFF);
+        }
+        write_u32_le(&mut job, 92, u32::from_le_bytes(a_noise_seed[0..4].try_into().unwrap()));
+        write_u32_le(&mut job, 96, u32::from_le_bytes(b_noise_seed[0..4].try_into().unwrap()));
+        all_jobs.extend_from_slice(&job);
+
+        candidate_seeds.push(a_noise_seed);
+    }
+
+    // Create persistent GPU mining session
+    let session = PersistentGpuMiningSession::new(batch_size as i64)?;
+
+    // Set global data buffers
+    let a_noised_tensor = crate::gpu_mining::create_cuda_tensor_i32(&all_a_noised)?;
+    let b_noised_t_tensor = crate::gpu_mining::create_cuda_tensor_i32(&all_b_noised_t)?;
+    let a_rows_tensor = crate::gpu_mining::create_cuda_tensor_i32(&a_rows_data)?;
+    let b_cols_tensor = crate::gpu_mining::create_cuda_tensor_i32(&b_cols_data)?;
+
+    session.set_buffers(&a_noised_tensor, &b_noised_t_tensor, &a_rows_tensor, &b_cols_tensor)?;
+
+    // Launch persistent worker
+    session.launch_worker()?;
+
+    // Create jobs tensor
+    let jobs_tensor = crate::gpu_mining::create_cuda_tensor_u8(&all_jobs)?;
+
+    // Enqueue jobs
+    session.enqueue_jobs(&jobs_tensor, batch_size as i64)?;
+
+    // Wait for completion
+    session.wait_for_completion()?;
+
+    // Fall back to batch mining for result checking
+    let all_jackpots = gpu_mine_batch(
+        &all_a_noised,
+        &all_b_noised_t,
+        &a_rows_data,
+        &b_cols_data,
+        &all_jobs,
+        batch_size as i64,
+        P as i64,
+        Q as i64,
+        tile_h as i64,
+        tile_w as i64,
+        m as i64,
+        n as i64,
+        k as i64,
+        rank as i64,
+    )?;
+
+    let num_combos = P * Q;
+    let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
+
+    let keys: Vec<u32> = candidate_seeds.iter().flat_map(|seed| {
+        seed.chunks(4).map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect::<Vec<u32>>()
+    }).collect();
+    let all_hashes = gpu_jackpot_hash(&all_jackpots, &keys, batch_size as i64, num_combos as i64)?;
+    for (candidate_idx, _a_noise_seed) in candidate_seeds.into_iter().enumerate() {
         for combo in 0..num_combos {
-            let start = (combo * JACKPOT_SIZE) as usize;
-            let end = start + JACKPOT_SIZE;
-            let jackpot_slice: [u32; JACKPOT_SIZE] = jackpots[start..end].try_into().unwrap();
-            let jackpot_hash = compute_jackpot_hash(&jackpot_slice, a_noise_seed);
-            let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
+            let start = (candidate_idx * num_combos * 8 + combo * 8) as usize;
+            let jackpot_hash: Hash256 = all_hashes[start..start + 8]
+                .iter()
+                .flat_map(|&u| u.to_le_bytes())
+                .collect::<Vec<u8>>()
+                .try_into()
+                .unwrap();
             if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
                 let a_rows = &a_rows_list[combo % P];
                 let b_cols = &b_cols_list[combo / P];
 
-                let a_proof = build_matrix_proof(&a_matrix, m, k, &job_key, a_rows);
-                let b_proof = build_matrix_proof(&b_transposed, n, k, &job_key, b_cols);
+                let mut winner_rng = StdRng::seed_from_u64(candidate_idx as u64);
+                for val in a_matrix_buf.iter_mut() {
+                    *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                }
+                for val in b_matrix_buf.iter_mut() {
+                    *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                }
+                for idx in 0..n * k {
+                    let i = idx / k;
+                    let j = idx % k;
+                    b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+                }
+
+                let a_proof = build_matrix_proof(&a_matrix_buf, m, k, &job_key, a_rows);
+                let b_proof = build_matrix_proof(&b_transposed_buf, n, k, &job_key, b_cols);
+
+                let proof = PlainProof {
+                    m,
+                    n,
+                    k,
+                    noise_rank: rank,
+                    a: a_proof,
+                    bt: b_proof,
+                    moe: None,
+                };
+
+                return Ok(Some(proof));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
+fn try_mine_one_gpu_batch_graph<R: Rng>(
+    _rng: &mut R,
+    m: usize,
+    n: usize,
+    k: usize,
+    header: IncompleteBlockHeader,
+    config: MiningConfiguration,
+    a_rows_list: &[Vec<usize>],
+    b_cols_list: &[Vec<usize>],
+    tile_h: usize,
+    tile_w: usize,
+    P: usize,
+    Q: usize,
+    wrong_jackpot_hash: bool,
+) -> Result<Option<PlainProof>> {
+    use crate::gpu_mining::MiningGraphState;
+
+    let rank = config.rank as usize;
+    let signal_min = SIGNAL_MIN;
+    let signal_max = SIGNAL_MAX;
+
+    let batch_size = GPU_BATCH_SIZE;
+
+    let job_key = compute_job_key(&header, &config);
+
+    let a_rows_data: Vec<i32> = a_rows_list.iter().flatten().map(|&x| x as i32).collect();
+    let b_cols_data: Vec<i32> = b_cols_list.iter().flatten().map(|&x| x as i32).collect();
+
+    let a_all_rows: Vec<usize> = (0..m).collect();
+    let b_all_cols: Vec<usize> = (0..n).collect();
+
+    let mut all_a_noised = Vec::with_capacity(batch_size * m * k);
+    let mut all_b_noised_t = Vec::with_capacity(batch_size * n * k);
+    let mut all_jobs = Vec::with_capacity(batch_size * mem::size_of::<MiningJob>());
+    let mut candidate_seeds = Vec::with_capacity(batch_size);
+
+    let mut a_matrix_buf = vec![0i8; m * k];
+    let mut b_matrix_buf = vec![0i8; k * n];
+    let mut b_transposed_buf = vec![0i8; n * k];
+    let mut a_noised_buf = vec![0i32; m * k];
+    let mut b_noised_buf = vec![0i32; k * n];
+    let mut b_noised_t_buf = vec![0i32; n * k];
+
+    for candidate_idx in 0..batch_size {
+        let mut candidate_rng = StdRng::seed_from_u64(candidate_idx as u64);
+
+        for val in a_matrix_buf.iter_mut() {
+            *val = candidate_rng.random_range(signal_min..=signal_max) as i8;
+        }
+        for val in b_matrix_buf.iter_mut() {
+            *val = candidate_rng.random_range(signal_min..=signal_max) as i8;
+        }
+
+        for idx in 0..n * k {
+            let i = idx / k;
+            let j = idx % k;
+            b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+        }
+
+        let a_row_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&a_matrix_buf));
+        let b_col_major = pearl_blake3::pad_to_chunk_boundary(&flatten_matrix(&b_transposed_buf));
+        let (b_noise_seed, a_noise_seed) = compute_commitment_hash(&job_key, &a_row_major, &b_col_major);
+
+        let noise = compute_noise_for_indices(k, rank, (b_noise_seed, a_noise_seed), &a_all_rows, &b_all_cols);
+
+        for idx in 0..m * k {
+            a_noised_buf[idx] = a_matrix_buf[idx] as i32 + noise.a[idx / k][idx % k] as i32;
+        }
+        for idx in 0..k * n {
+            b_noised_buf[idx] = b_matrix_buf[idx] as i32 + noise.b[idx % n][idx / n] as i32;
+        }
+        for idx in 0..n * k {
+            let i = idx / k;
+            let j = idx % k;
+            b_noised_t_buf[idx] = b_noised_buf[j * n + i];
+        }
+
+        all_a_noised.extend_from_slice(&a_noised_buf);
+        all_b_noised_t.extend_from_slice(&b_noised_t_buf);
+
+        let mut job = [0u8; mem::size_of::<MiningJob>()];
+        write_u32_le(&mut job, 0, 0); // status
+        write_u32_le(&mut job, 4, candidate_idx as u32); // candidate_id
+        write_u32_le(&mut job, 8, m as u32);
+        write_u32_le(&mut job, 12, n as u32);
+        write_u32_le(&mut job, 16, k as u32);
+        write_u32_le(&mut job, 20, rank as u32);
+        write_u32_le(&mut job, 24, tile_h as u32);
+        write_u32_le(&mut job, 28, tile_w as u32);
+        write_u32_le(&mut job, 32, (P * Q) as u32);
+        write_u32_le(&mut job, 36, 0); // a_offset
+        write_u32_le(&mut job, 40, 0); // b_offset
+        write_u32_le(&mut job, 44, 0); // a_rows_offset
+        write_u32_le(&mut job, 48, 0); // b_cols_offset
+        write_u32_le(&mut job, 52, 0); // jackpot_offset
+        write_u32_le(&mut job, 56, 0); // result_offset
+        for i in 0..8 {
+            write_u32_le(&mut job, 60 + i * 4, 0xFFFFFFFF);
+        }
+        write_u32_le(&mut job, 92, u32::from_le_bytes(a_noise_seed[0..4].try_into().unwrap()));
+        write_u32_le(&mut job, 96, u32::from_le_bytes(b_noise_seed[0..4].try_into().unwrap()));
+        all_jobs.extend_from_slice(&job);
+
+        candidate_seeds.push(a_noise_seed);
+    }
+
+    // Create CUDA Graph for batch mining
+    let graph_state = MiningGraphState::new(
+        batch_size as i64,
+        (P * Q) as i64,
+        tile_h as i64,
+        tile_w as i64,
+        m as i64,
+        n as i64,
+        k as i64,
+        rank as i64,
+    )?;
+
+    // Prepare tensors
+    let a_noised_tensor = crate::gpu_mining::create_cuda_tensor_i32(&all_a_noised)?;
+    let b_noised_t_tensor = crate::gpu_mining::create_cuda_tensor_i32(&all_b_noised_t)?;
+    let a_rows_tensor = crate::gpu_mining::create_cuda_tensor_i32(&a_rows_data)?;
+    let b_cols_tensor = crate::gpu_mining::create_cuda_tensor_i32(&b_cols_data)?;
+    let jobs_tensor = crate::gpu_mining::create_cuda_tensor_u8(&all_jobs)?;
+
+    let num_combos = P * Q;
+    let jackpot_bound = extract_difficulty_bound(header.nbits, &config);
+
+    let keys: Vec<u32> = candidate_seeds.iter().flat_map(|seed| {
+        seed.chunks(4).map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect::<Vec<u32>>()
+    }).collect();
+    let keys_tensor = crate::gpu_mining::create_cuda_tensor_u32(&keys)?;
+
+    // Allocate output tensors (pre-allocated for graph reuse)
+    let (jackpots_tensor, hashes_tensor) = Python::with_gil(|py| {
+        let torch = py.import("torch")
+            .map_err(|e| anyhow::anyhow!("Failed to import torch: {}", e))?;
+
+        let device = a_noised_tensor.bind(py).call_method0("device")
+            .map_err(|e| anyhow::anyhow!("Failed to get tensor device: {}", e))?;
+        let options = device.call_method0("make_tensor_options")
+            .map_err(|e| anyhow::anyhow!("Failed to make tensor options: {}", e))?;
+        let uint32 = torch.getattr("uint32")
+            .map_err(|e| anyhow::anyhow!("Failed to get torch.uint32: {}", e))?;
+        let options = options.call_method1("dtype", (uint32,))
+            .map_err(|e| anyhow::anyhow!("Failed to set dtype: {}", e))?;
+
+        let jackpots_tensor = torch
+            .call_method1("empty", (batch_size as i64, num_combos as i64, JACKPOT_SIZE as i64))
+            .map_err(|e| anyhow::anyhow!("Failed to create jackpots tensor: {}", e))?;
+        let jackpots_tensor = jackpots_tensor.call_method1("to", (options.clone(),))
+            .map_err(|e| anyhow::anyhow!("Failed to set jackpots dtype: {}", e))?;
+
+        let hashes_tensor = torch
+            .call_method1("empty", (batch_size as i64, num_combos as i64, 8i64))
+            .map_err(|e| anyhow::anyhow!("Failed to create hashes tensor: {}", e))?;
+        let hashes_tensor = hashes_tensor.call_method1("to", (options,))
+            .map_err(|e| anyhow::anyhow!("Failed to set hashes dtype: {}", e))?;
+
+        Ok::<(pyo3::Py<pyo3::PyAny>, pyo3::Py<pyo3::PyAny>), anyhow::Error>((jackpots_tensor.into(), hashes_tensor.into()))
+    })?;
+
+    // Launch graph
+    graph_state.launch(
+        &a_noised_tensor, &b_noised_t_tensor,
+        &a_rows_tensor, &b_cols_tensor,
+        &jobs_tensor, &jackpots_tensor,
+        &keys_tensor, &hashes_tensor
+    )?;
+
+    // Wait for completion
+    graph_state.synchronize()?;
+
+    // Read results from hashes tensor
+    let all_hashes = Python::with_gil(|py| {
+        let cpu = hashes_tensor.bind(py).call_method0("cpu")
+            .map_err(|e| anyhow::anyhow!("Failed to move tensor to CPU: {}", e))?;
+        let np = cpu.call_method0("numpy")
+            .map_err(|e| anyhow::anyhow!("Failed to convert to numpy: {}", e))?;
+        let list = np.call_method0("tolist")
+            .map_err(|e| anyhow::anyhow!("Failed to convert to list: {}", e))?;
+        let nested: Vec<Vec<Vec<u32>>> = list.extract()
+            .map_err(|e| anyhow::anyhow!("Failed to extract GPU hash result: {}", e))?;
+        Ok::<Vec<u32>, anyhow::Error>(nested.into_iter().flatten().flatten().collect())
+    })?;
+    for (candidate_idx, _a_noise_seed) in candidate_seeds.into_iter().enumerate() {
+        for combo in 0..num_combos {
+            let start = (candidate_idx * num_combos * 8 + combo * 8) as usize;
+            let jackpot_hash: Hash256 = all_hashes[start..start + 8]
+                .iter()
+                .flat_map(|&u| u.to_le_bytes())
+                .collect::<Vec<u8>>()
+                .try_into()
+                .unwrap();
+            if (U256::from_little_endian(&jackpot_hash) <= jackpot_bound) != wrong_jackpot_hash {
+                let a_rows = &a_rows_list[combo % P];
+                let b_cols = &b_cols_list[combo / P];
+
+                let mut winner_rng = StdRng::seed_from_u64(candidate_idx as u64);
+                for val in a_matrix_buf.iter_mut() {
+                    *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                }
+                for val in b_matrix_buf.iter_mut() {
+                    *val = winner_rng.random_range(signal_min..=signal_max) as i8;
+                }
+                for idx in 0..n * k {
+                    let i = idx / k;
+                    let j = idx % k;
+                    b_transposed_buf[idx] = b_matrix_buf[j * n + i];
+                }
+
+                let a_proof = build_matrix_proof(&a_matrix_buf, m, k, &job_key, a_rows);
+                let b_proof = build_matrix_proof(&b_transposed_buf, n, k, &job_key, b_cols);
 
                 let proof = PlainProof {
                     m,
@@ -543,7 +1082,7 @@ fn cpu_mine_one(
                     m,
                     n,
                     k,
-                    noise_rank: rank as u16,
+                    noise_rank: rank,
                     a: a_proof,
                     bt: b_proof,
                     moe: None,
@@ -557,6 +1096,7 @@ fn cpu_mine_one(
     Ok(result.lock().unwrap().clone())
 }
 
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 fn write_u32_le(buf: &mut [u8], offset: usize, value: u32) {
     buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
