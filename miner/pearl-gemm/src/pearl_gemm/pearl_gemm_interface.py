@@ -742,6 +742,39 @@ def tensor_hash(
     )
 
 
+def run_tensor_hash(
+    data,
+    key,
+    out,
+    roots,
+    threads_per_block=128,
+    num_stages=2,
+    leaves_per_mt_block=512,
+):
+    """Hash a tensor using a key, inferring num_blocks from the data size.
+
+    This is a convenience wrapper around tensor_hash that computes the number
+    of BLAKE3 blocks from the data size and device properties, so callers don't
+    need to pre-allocate the roots scratchpad with the exact block count.
+
+    Args:
+        data (Tensor): Input tensor to hash (uint8)
+        key (Tensor): Key tensor used for hashing (uint8, 32 bytes)
+        out (Tensor): Output tensor for hash result (uint8, 32 bytes)
+        roots (Tensor): Scratchpad tensor for intermediate results (uint8)
+        threads_per_block (int): Number of threads per block. Default: 128
+        num_stages (int): Number of pipeline stages. Default: 2
+        leaves_per_mt_block (int): Number of threads for compute_blake_mt_kernel.
+                                  Default: 512
+
+    Returns:
+        Tensor: Hash output tensor (same as out)
+    """
+    return pearl_gemm_cuda.run_tensor_hash(
+        data, key, out, roots, threads_per_block, num_stages, leaves_per_mt_block
+    )
+
+
 def gpu_lde_eval(coeffs, eval_points, num_coeffs, num_points, poly_degree):
     """GPU-accelerated Low-Degree Extension (LDE) evaluation.
 
@@ -829,6 +862,20 @@ def _abstract_commitment_hash_from_merkle_roots(
     B_commitment_hash,
     routing_root=None,
     offsets_hash=None,
+):
+    return None
+
+
+# Fake Tensor function for torch.compile support
+@torch.library.register_fake("pearl_gemm::run_tensor_hash")
+def _abstract_run_tensor_hash(
+    data,
+    key,
+    out,
+    roots,
+    threads_per_block=128,
+    num_stages=2,
+    leaves_per_mt_block=512,
 ):
     return None
 

@@ -10,7 +10,7 @@ from pearl_gemm import (
     make_pow_target_tensor,
     noise_gen,
     noisy_gemm,
-    tensor_hash,
+    run_tensor_hash,
 )
 
 from .callbacks import (
@@ -122,7 +122,7 @@ def pearl_gemm_noisy(
     key_tensor = torch.frombuffer(bytearray(hash_key), dtype=torch.uint8).to("cuda")
 
     A_tensor_hash = torch.empty(32, device="cuda", dtype=torch.uint8)
-    tensor_hash(
+    run_tensor_hash(
         A.to(torch.uint8),
         key_tensor,
         A_tensor_hash,
@@ -130,7 +130,7 @@ def pearl_gemm_noisy(
     )
 
     B_tensor_hash = torch.empty(32, device="cuda", dtype=torch.uint8)
-    tensor_hash(
+    run_tensor_hash(
         B.to(torch.uint8),
         key_tensor,
         B_tensor_hash,

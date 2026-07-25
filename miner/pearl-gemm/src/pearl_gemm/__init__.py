@@ -116,6 +116,7 @@ from .pearl_gemm_interface import (  # noqa: E402
     noise_B,
     noise_gen,
     noisy_gemm,
+    run_tensor_hash,
     tensor_hash,
 )
 
@@ -139,5 +140,6 @@ __all__ = [
     "noise_gen",
     "noisy_gemm",
     "pearl_gemm_interface",
+    "run_tensor_hash",
     "tensor_hash",
 ]

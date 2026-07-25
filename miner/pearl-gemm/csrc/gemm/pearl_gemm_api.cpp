@@ -1761,6 +1761,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
   m.def("fused_evaluate_accumulate_jackpot(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, int rank) -> Tensor");
   m.def("launch_persistent_mining(Tensor a_noised, Tensor b_noised_t, Tensor a_rows, Tensor b_cols, Tensor jobs, int num_jobs) -> ()");
   m.def("tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
+  m.def("run_tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("gpu_jackpot_hash(Tensor jackpots, Tensor keys) -> Tensor");
   m.def("gpu_lde_eval(Tensor coeffs, Tensor eval_points, int num_coeffs, int num_points, int poly_degree) -> Tensor");
   m.def("gpu_fri_fold(Tensor layer, Tensor challenges, int layer_size) -> Tensor");
@@ -1799,6 +1800,7 @@ TORCH_LIBRARY_IMPL(pearl_gemm, CUDA, m) {
   m.impl("fused_evaluate_accumulate_jackpot", &fused_evaluate_accumulate_jackpot);
   m.impl("launch_persistent_mining", &launch_persistent_mining);
   m.impl("tensor_hash", &run_tensor_hash);
+  m.impl("run_tensor_hash", &run_tensor_hash);
   m.impl("gpu_jackpot_hash", &gpu_jackpot_hash);
   m.impl("gpu_lde_eval", &run_gpu_lde_eval);
   m.impl("gpu_fri_fold", &run_gpu_fri_fold);

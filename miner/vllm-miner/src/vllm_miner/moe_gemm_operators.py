@@ -12,7 +12,7 @@ from pearl_gemm import (
     get_required_scratchpad_bytes,
     make_pow_target_tensor,
     noisy_gemm,
-    tensor_hash,
+    run_tensor_hash,
 )
 from pearl_gemm.moe import build_routing_data, get_build_routing_data_scratchpad_bytes
 
@@ -97,7 +97,7 @@ def _hash_2d(data_u8: torch.Tensor, key_tensor: torch.Tensor, device: torch.devi
     scratchpad = torch.empty(
         get_required_scratchpad_bytes(data_u8.numel()), dtype=torch.uint8, device=device
     )
-    tensor_hash(data_u8, key_tensor, out, scratchpad)
+    run_tensor_hash(data_u8, key_tensor, out, scratchpad)
     return out
 
 

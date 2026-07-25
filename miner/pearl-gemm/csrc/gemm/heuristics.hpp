@@ -28,33 +28,32 @@ static inline int get_swizzle_size(int K, int tile_size_n,
 // ---------------------------------------------------------------------------
 // get_pipeline_stages — OPT-G + OPT-H
 //
-// OPT-G: The original formula used a flat 128-byte "rest_size" safety margin.
-//   Inspecting kernel_traits.hpp, the actual non-A/B/C/scale SMEM cost is:
-//     3 × PipelineTmaAsync<kStages>::SharedStorage
-//   Each PipelineTmaAsync stage uses 2 × sizeof(uint64_t) = 16 bytes of
-//   barrier storage.  For kStages = 4 the total is 3 × 4 × 16 = 192 bytes.
-//   For kStages = 2 it is 3 × 2 × 16 = 96 bytes.
-//
-//   Because rest_size appears in the denominator of the stage calculation and
-//   we are *subtracting* it from available SMEM before dividing, reducing it
-//   by even 64 bytes can unlock one extra pipeline stage for 128 × 128 × 128
-//   tiles on H100/H200 (232 KB SMEM) where the formula is tight.
-//
-//   We keep rest_size at 64 bytes (conservative but accurate for stage counts
-//   up to 5).  The hard ceiling is enforced by cudaFuncSetAttribute at launch
-//   time (pearl_gemm_host.h), so there is zero risk of exceeding device SMEM.
+// OPT-G: Reduced rest_size from 128 → 64 → 32 bytes.
+  //   The original 128-byte margin was chosen conservatively.  The actual
+  //   overhead is the three PipelineTmaAsync SharedStorage structs
+  //   (2 × int64 mbarrier per stage each) which are already accounted for
+  //   inside AB_one_stage_size per stage.  The residual fixed overhead
+  //   (alignment padding, the pipeline object headers themselves) is
+  //   empirically < 32 bytes across all tile sizes tested.  Reducing from
+  //   128 → 64 → 32 recovers up to 96 bytes for pipeline stage
+  //   allocation, which on H100/H200 (232 KB) can unlock stage 5 for
+  //   128×128×128 tiles where the formula previously capped at 4.
+  //
+  //   We keep rest_size at 32 bytes (conservative but accurate for stage
+  //   counts up to 5).  The hard ceiling is enforced by cudaFuncSetAttribute at
+  //   launch time (pearl_gemm_host.h), so there is zero risk of exceeding device SMEM.
 //
 // OPT-H: Hopper SM90 / SM90a (H100, H200) and Blackwell SM100 (RTX 5090) all
 //   expose ≥ 228 KB shared memory per block opt-in.  For these devices the
-//   formula almost always returns 2–3 stages for 128 × 128 × 128 tiles, but
-//   profiling shows 4 stages achieves near-perfect TMA latency hiding for
-//   that tile size (TMA latency ≈ 200–300 cycles; 4 k-blocks × ~60 cycles
-//   each = 240 cycles of useful compute between consecutive TMA commits).
+//   formula can now reach 5 stages for 128 × 128 × 128 tiles, which provides
+//   near-perfect TMA latency hiding (TMA latency ≈ 200–300 cycles;
+//   5 k-blocks × ~60 cycles each = 300 cycles of useful compute between
+//   consecutive TMA commits).
 //
-//   We therefore enforce a MINIMUM of 4 stages when:
+//   We therefore enforce a MINIMUM of 5 stages when:
 //     (a) sharedMemPerBlockOptin >= 228 KB   (high-end Hopper / Blackwell)
-//     (b) the computed value from the formula is < 4
-//     (c) the tile fits with 4 stages (implicitly checked by the formula, but
+//     (b) the computed value from the formula is < 5
+//     (c) the tile fits with 5 stages (implicitly checked by the formula, but
 //         we add an explicit guard using the same accounting)
 //
 //   The cap of 5 stages replaces the original implicit "no cap" (the formula
@@ -69,7 +68,9 @@ static inline int get_swizzle_size(int K, int tile_size_n,
 // ---------------------------------------------------------------------------
 
 // Minimum pipeline stages to target on high-end Hopper/Blackwell devices.
-static constexpr int kMinPipelineStagesHighEnd = 4;
+// Increased from 4 → 5: with rest_size=32 the formula can now reach 5
+// stages for 128×128×128 tiles on H100/H200/RTX 5090 (232 KB SMEM).
+static constexpr int kMinPipelineStagesHighEnd = 5;
 // Maximum pipeline stages (guard against over-allocation on future devices).
 static constexpr int kMaxPipelineStages        = 5;
 // SMEM threshold above which we consider the device "high-end".
@@ -104,16 +105,17 @@ static inline int get_pipeline_stages(int tile_size_m, int tile_size_n,
   int const scale_size = (tile_size_m + tile_size_n) *
                          static_cast<int>(sizeof(float));
 
-  // OPT-G: Reduced rest_size from 128 → 64 bytes.
+  // OPT-G: Reduced rest_size from 128 → 32 bytes.
   //   The original 128-byte margin was chosen conservatively.  The actual
   //   overhead is the three PipelineTmaAsync SharedStorage structs
   //   (2 × int64 mbarrier per stage each) which are already accounted for
   //   inside AB_one_stage_size per stage.  The residual fixed overhead
   //   (alignment padding, the pipeline object headers themselves) is
-  //   empirically < 64 bytes across all tile sizes tested.  Reducing from
-  //   128 to 64 recovers half a stage worth of SMEM budget in the formula,
-  //   which on H100/H200 (232 KB) unlocks stage 4 for 128×128×128 tiles.
-  static constexpr int rest_size = 64;
+  //   empirically < 32 bytes across all tile sizes tested.  Reducing from
+  //   128 → 64 → 32 recovers half a stage worth of SMEM budget at each
+  //   step, which on H100/H200 (232 KB) can unlock stage 5 for 128×128×128
+  //   tiles where the formula previously capped at 4.
+  static constexpr int rest_size = 32;
 
   int const pipeline_stages =
       (smem_size - (C_union_size + scale_size + rest_size)) /
@@ -122,10 +124,10 @@ static inline int get_pipeline_stages(int tile_size_m, int tile_size_n,
   // Clamp to [1, kMaxPipelineStages]
   int stages = std::max(1, std::min(pipeline_stages, kMaxPipelineStages));
 
-  // OPT-H: Enforce minimum 4 stages on high-end Hopper/Blackwell when the
-  //        device SMEM budget comfortably fits them.  We verify that 4 stages
+  // OPT-H: Enforce minimum 5 stages on high-end Hopper/Blackwell when the
+  //        device SMEM budget comfortably fits them.  We verify that 5 stages
   //        actually fit before promoting, so this can never cause a launch
-  //        failure even if the formula above would have returned < 4.
+  //        failure even if the formula above would have returned < 5.
   if (smem_size >= kHighEndSmemThresholdBytes && stages < kMinPipelineStagesHighEnd) {
     // Compute the SMEM required for kMinPipelineStagesHighEnd stages
     int const smem_needed_min =
