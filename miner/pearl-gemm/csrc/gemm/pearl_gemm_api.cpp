@@ -32,6 +32,7 @@
 #include <iostream>
 #include "../blake3/blake3.cuh"
 #include "persistent_pipeline.cuh"
+#include "candidate_gen/gpu_candidate_generation.cuh"
 
 namespace PYBIND11_NAMESPACE {
 namespace detail {
@@ -1315,6 +1316,89 @@ at::Tensor gpu_jackpot_hash(
 
   cudaStreamSynchronize(stream);
   return hashes;
+}
+
+at::Tensor gpu_generate_and_mine_batch(
+    uint64_t base_seed,
+    uint32_t batch_size,
+    uint32_t m, uint32_t n, uint32_t k, uint32_t rank,
+    uint64_t P, uint64_t Q,
+    uint64_t tile_h, uint64_t tile_w,
+    const at::Tensor& a_rows_data,
+    const at::Tensor& b_cols_data,
+    const at::Tensor& jobs,
+    int64_t num_jobs) {
+  CHECK_DEVICE(a_rows_data);
+  CHECK_DEVICE(b_cols_data);
+  CHECK_DEVICE(jobs);
+  CHECK_CONTIGUOUS(a_rows_data);
+  CHECK_CONTIGUOUS(b_cols_data);
+  CHECK_CONTIGUOUS(jobs);
+
+  at::cuda::CUDAGuard device_guard{(char)a_rows_data.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  uint32_t num_combos = static_cast<uint32_t>(P * Q);
+  uint32_t batch_size_u = static_cast<uint32_t>(batch_size);
+
+  // Allocate GPU buffers for candidate generation
+  auto options = a_rows_data.options().dtype(torch::kInt8);
+  auto d_a_raw = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(m), static_cast<int64_t>(k)}, options);
+  auto d_b_raw_t = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(n), static_cast<int64_t>(k)}, options);
+
+  options = a_rows_data.options().dtype(torch::kInt32);
+  auto d_a_noised = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(m), static_cast<int64_t>(k)}, options);
+  auto d_b_noised_t = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(n), static_cast<int64_t>(k)}, options);
+
+  options = a_rows_data.options().dtype(torch::kUInt32);
+  auto d_a_noise_seed = torch::empty({static_cast<int64_t>(batch_size), 8}, options);
+
+  // Launch candidate generation kernel on GPU
+  pearl::mining::launch_gpu_candidate_generation(
+      d_a_raw.data_ptr<int8_t>(),
+      d_b_raw_t.data_ptr<int8_t>(),
+      d_a_noised.data_ptr<int32_t>(),
+      d_b_noised_t.data_ptr<int32_t>(),
+      d_a_noise_seed.data_ptr<uint32_t>(),
+      batch_size_u,
+      m, n, k, rank,
+      base_seed,
+      stream);
+
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      TORCH_CHECK(false, "Candidate generation kernel launch failed: ", cudaGetErrorString(err));
+  }
+
+  // Launch mining kernel with GPU-generated device pointers
+  auto jackpots = torch::empty({num_jobs, num_combos, JACKPOT_SIZE}, d_a_noised.options().dtype(torch::kUInt32));
+
+  pearl::mining::launch_gpu_mining(
+      d_a_noised.data_ptr<int32_t>(),
+      d_b_noised_t.data_ptr<int32_t>(),
+      a_rows_data.data_ptr<int32_t>(),
+      b_cols_data.data_ptr<int32_t>(),
+      reinterpret_cast<pearl::mining::MiningJob*>(jobs.data_ptr()),
+      jackpots.data_ptr<uint32_t>(),
+      static_cast<uint32_t>(num_jobs),
+      static_cast<uint32_t>(P),
+      static_cast<uint32_t>(Q),
+      static_cast<uint32_t>(tile_h),
+      static_cast<uint32_t>(tile_w),
+      static_cast<uint32_t>(m),
+      static_cast<uint32_t>(n),
+      static_cast<uint32_t>(k),
+      static_cast<uint32_t>(rank),
+      stream);
+
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      TORCH_CHECK(false, "Mining kernel launch failed: ", cudaGetErrorString(err));
+  }
+
+  cudaStreamSynchronize(stream);
+
+  return jackpots;
 }
 
 // CUDA Graph API for batch mining
