@@ -30,6 +30,7 @@ struct alignas(16) MiningJob {
     uint32_t b_cols_offset;
     uint32_t result_offset;
     uint32_t pow_target[8];
+    uint32_t pow_key[8];
     uint32_t a_noise_seed;
     uint32_t b_noise_seed;
 };

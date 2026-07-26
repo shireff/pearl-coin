@@ -15,7 +15,21 @@ from pearl_gemm_build_utils.kernel_configs import (
 # Build matmul kernels
 _matmul_kernels = []
 
-# 128x256x128, R=64/128, stage=3
+# 128x256x128, R=64/128, stage=5 (Phase 6: Hopper TMA 5-stage pipeline)
+for R in [64, 128]:
+    _matmul_kernels.append(
+        MatmulKernelConfig(
+            tile_size_m=128,
+            tile_size_n=256,
+            tile_size_k=128,
+            R=R,
+            pipeline_stages=5,
+            cM=1,
+            cN=1,
+        )
+    )
+
+# Also keep stage=3 as fallback for devices with < 228 KB SMEM
 for R in [64, 128]:
     _matmul_kernels.append(
         MatmulKernelConfig(

@@ -33,6 +33,20 @@ struct alignas(16) PersistentJob {
     uint32_t result_offset;
 };
 
+struct alignas(128) PersistentJobQueue {
+    volatile uint32_t head;
+    volatile uint32_t tail;
+    uint32_t capacity;
+    uint32_t num_blocks;
+    uint32_t running;
+    uint32_t count;
+    uint32_t batch_id;
+    uint32_t completed_count;
+    uint32_t padding[8];
+    PersistentJob jobs[MAX_QUEUE_JOBS];
+    uint32_t results[MAX_QUEUE_JOBS];
+};
+
 // Opaque handle for persistent pipeline state
 struct PersistentPipelineState;
 

@@ -25,6 +25,69 @@ miner/
 - CUDA toolkit and NVIDIA GPU (for `pearl-gemm` and running the miner)
 - Rust toolchain (for `py-pearl-mining` dependencies)
 
+### CUDA Toolkit Setup
+
+Install CUDA Toolkit 13.x from NVIDIA:
+
+- Download: https://developer.nvidia.com/cuda-130-download-archive
+- Select: Windows → x86_64 → 10 → exe (local)
+- Install to: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0`
+- Add to PATH: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin`
+
+Verify installation:
+```bash
+nvcc --version
+```
+
+### PyTorch with CUDA Support
+
+Install PyTorch with CUDA support (not CPU-only):
+
+```bash
+pip uninstall torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+Verify CUDA is available:
+```bash
+python -c "import torch; print(torch.__version__); print(torch.version.cuda)"
+# Expected output: 2.x.x+cu128 and 12.8
+```
+
+### Build CUDA Extension
+
+Build the `pearl-gemm` CUDA extension:
+
+```bash
+cd miner/pearl-gemm
+python setup.py build_ext --inplace
+```
+
+Verify the extension was built:
+```bash
+ls src/pearl_gemm/*.pyd    # Windows
+ls build/lib/*.so          # Linux
+```
+
+### Build Rust zk-pow with GPU Support
+
+From the repository root:
+
+```bash
+cd zk-pow
+cargo build --features gpu_prove
+```
+
+If `pearl_gemm_cuda` is not found automatically, set the library path:
+
+```bash
+# Windows (PowerShell)
+$env:PEARL_GEMM_CUDA_PATH = "C:\Users\Shireff\Desktop\mining\pearl\miner\pearl-gemm\src\pearl_gemm"
+
+# Linux/macOS
+export PEARL_GEMM_CUDA_PATH=/path/to/pearl-gemm/src/pearl_gemm
+```
+
 ## Build
 
 All packages are managed as a uv workspace. Run the following from the **repository root**:

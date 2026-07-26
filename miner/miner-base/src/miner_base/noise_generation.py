@@ -160,28 +160,31 @@ class NoiseGenerator:
         bytes_per_lines = 4
         draws = int(ceil(required_lines * bytes_per_lines / blake3.digest_size))
 
-        # We draw 4 bytes for each matrix element
-        for i in range(draws):
-            random_hash = self.__get_random_hash(i, seed, key, 1)
-            random_uint32_array = np.frombuffer(
-                random_hash,
-                dtype=np.uint32,
-            )
-            for k in range(blake3.digest_size // bytes_per_lines):
-                random_uint32 = random_uint32_array[k]
-                first_idx = random_uint32 & self.rank_mask
-                second_idx = first_idx ^ (
-                    1 + np_mul_hi_u32(np.uint32(self.noise_rank - 1), random_uint32)
-                )
-                permutation = torch.zeros(self.noise_rank, dtype=torch.int8)
-                permutation[first_idx] = 1
-                permutation[second_idx] = -1
-                assignment_index = i * blake3.digest_size // bytes_per_lines + k
-                if assignment_index >= required_lines:
-                    break
-                if assign_columns:
-                    noise_matrix[:, assignment_index] = permutation
-                else:
-                    noise_matrix[assignment_index, :] = permutation
+        digests = b"".join(
+            self.__get_random_hash(i, seed, key, 1) for i in range(draws)
+        )
+
+        all_uint32 = np.frombuffer(digests, dtype=np.uint32)
+        uint32_per_digest = blake3.digest_size // bytes_per_lines
+        all_uint32 = all_uint32.reshape(draws, uint32_per_digest)
+
+        all_first_idx = all_uint32 & self.rank_mask
+        high_bits = np_mul_hi_u32(
+            np.uint32(self.noise_rank - 1), all_uint32
+        )
+        all_second_idx = all_first_idx ^ (np.uint32(1) + high_bits)
+
+        assignment_flat = np.arange(draws * uint32_per_digest)
+        valid_mask = assignment_flat < required_lines
+        valid_first = all_first_idx[valid_mask]
+        valid_second = all_second_idx[valid_mask]
+        valid_assign = assignment_flat[valid_mask]
+
+        if assign_columns:
+            noise_matrix[valid_first.numpy(), valid_assign.numpy()] = np.int8(1)
+            noise_matrix[valid_second.numpy(), valid_assign.numpy()] = np.int8(-1)
+        else:
+            noise_matrix[valid_assign.numpy(), valid_first.numpy()] = np.int8(1)
+            noise_matrix[valid_assign.numpy(), valid_second.numpy()] = np.int8(-1)
 
         return noise_matrix

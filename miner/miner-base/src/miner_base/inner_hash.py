@@ -52,14 +52,20 @@ class InnerHasher:
 
         self.num_tiles_hashed += num_tiles_h * num_tiles_w
 
-        hashes = []
+        H = num_tiles_h * self.tile_h
+        W = num_tiles_w * self.tile_w
+        tiles_flat = (
+            tensor[:H, :W]
+            .reshape(num_tiles_h, self.tile_h, num_tiles_w, self.tile_w)
+            .permute(0, 2, 1, 3)
+            .reshape(-1, self.tile_h * self.tile_w)
+        )
+        tiles_np = tiles_flat.numpy().view(np.uint32)
+        hash_values = np.bitwise_xor.reduce(tiles_np, axis=1)
 
-        for i in range(num_tiles_h):
-            for j in range(num_tiles_w):
-                tile = tensor[
-                    i * self.tile_h : (i + 1) * self.tile_h,
-                    j * self.tile_w : (j + 1) * self.tile_w,
-                ]
-                hashes.append(hash_tile(tile, (i, j)))
-
-        return hashes
+        row_idx = np.repeat(np.arange(num_tiles_h), num_tiles_w)
+        col_idx = np.tile(np.arange(num_tiles_w), num_tiles_h)
+        return [
+            InnerHashResult(hash=np.uint32(h), index=(int(r), int(c)))
+            for h, r, c in zip(hash_values, row_idx, col_idx)
+        ]

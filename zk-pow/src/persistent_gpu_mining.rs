@@ -96,36 +96,21 @@ fn call_stop_persistent_worker(state: &pyo3::Py<pyo3::PyAny>) -> Result<()> {
 // Public API
 // ============================================================================
 
-/// Persistent GPU mining session.
-///
-/// This struct manages a persistent GPU mining pipeline that stays resident
-/// across multiple mining batches, eliminating kernel launch overhead.
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 pub struct PersistentGpuMiningSession {
-    #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
     state: Option<pyo3::Py<pyo3::PyAny>>,
     max_jackpots: i64,
 }
 
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 impl PersistentGpuMiningSession {
     /// Create a new persistent GPU mining session.
     pub fn new(max_jackpots: i64) -> Result<Self> {
-        if !persistent_gpu_mining_available() {
-            anyhow::bail!("Persistent GPU mining not available - build with --features gpu_prove,pyo3")
-        }
-
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            let state = call_create_persistent_pipeline(max_jackpots)?;
-            Ok(Self {
-                state: Some(state),
-                max_jackpots,
-            })
-        }
-
-        #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
-        {
-            anyhow::bail!("Persistent GPU mining not available")
-        }
+        let state = call_create_persistent_pipeline(max_jackpots)?;
+        Ok(Self {
+            state: Some(state),
+            max_jackpots,
+        })
     }
 
     /// Set global data buffers for the pipeline.
@@ -136,82 +121,40 @@ impl PersistentGpuMiningSession {
         a_rows: &pyo3::Py<pyo3::PyAny>,
         b_cols: &pyo3::Py<pyo3::PyAny>,
     ) -> Result<()> {
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
-            call_pipeline_set_buffers(state, a_noised, b_noised_t, a_rows, b_cols)
-        }
-
-        #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
-        {
-            anyhow::bail!("Persistent GPU mining not available")
-        }
+        let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
+        call_pipeline_set_buffers(state, a_noised, b_noised_t, a_rows, b_cols)
     }
 
     /// Launch the persistent GPU worker kernel.
     pub fn launch_worker(&self) -> Result<()> {
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
-            call_launch_persistent_worker(state)
-        }
-
-        #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
-        {
-            anyhow::bail!("Persistent GPU mining not available")
-        }
+        let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
+        call_launch_persistent_worker(state)
     }
 
     /// Stop the persistent GPU worker kernel.
     pub fn stop_worker(&self) -> Result<()> {
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
-            call_stop_persistent_worker(state)
-        }
-
-        #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
-        {
-            anyhow::bail!("Persistent GPU mining not available")
-        }
+        let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
+        call_stop_persistent_worker(state)
     }
 
     /// Enqueue jobs for GPU processing.
     pub fn enqueue_jobs(&self, jobs: &pyo3::Py<pyo3::PyAny>, num_jobs: i64) -> Result<()> {
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
-            call_pipeline_enqueue_jobs(state, jobs, num_jobs)
-        }
-
-        #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
-        {
-            anyhow::bail!("Persistent GPU mining not available")
-        }
+        let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
+        call_pipeline_enqueue_jobs(state, jobs, num_jobs)
     }
 
     /// Wait for all queued jobs to complete.
     pub fn wait_for_completion(&self) -> Result<()> {
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
-            call_pipeline_wait_for_completion(state)
-        }
-
-        #[cfg(not(all(feature = "gpu_prove", feature = "pyo3")))]
-        {
-            anyhow::bail!("Persistent GPU mining not available")
-        }
+        let state = self.state.as_ref().ok_or_else(|| anyhow::anyhow!("Pipeline not initialized"))?;
+        call_pipeline_wait_for_completion(state)
     }
 }
 
+#[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
 impl Drop for PersistentGpuMiningSession {
     fn drop(&mut self) {
-        #[cfg(all(feature = "gpu_prove", feature = "pyo3"))]
-        {
-            if let Some(state) = self.state.take() {
-                let _ = call_destroy_persistent_pipeline(&state);
-            }
+        if let Some(state) = self.state.take() {
+            let _ = call_destroy_persistent_pipeline(&state);
         }
     }
 }

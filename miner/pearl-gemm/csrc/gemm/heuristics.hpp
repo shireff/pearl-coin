@@ -155,20 +155,37 @@ static inline std::tuple<int, int, int> get_optimal_tile_size(
   int const smem_size = dprops->sharedMemPerBlockOptin;
   int const cc = dprops->major * 10 + dprops->minor;
 
-  // Base tile sizes: (tile_m, tile_n, tile_k)
+// Base tile sizes for SM90+: occupancy-first, smallest first
+  // to maximize blocks/SM → all 4 Tensor Core units active.
+  // {32,32,128} → ~43KB/block → 5 blocks/SM on H100 → 4/4 TC units.
   std::vector<std::tuple<int, int, int>> candidates = {
-      {128, 256, 128},
-      {128, 128, 128},
-      {64, 256, 128},
+      {32, 32, 128},
+      {32, 64, 128},
+      {64, 32, 128},
+      {64, 64, 128},
       {64, 128, 128},
-      {128, 256, 64},
+      {128, 64, 128},
+      {64, 256, 128},
+      {128, 128, 128},
       {64, 256, 64},
+      {128, 256, 128},
+      {128, 128, 64},
+      {128, 256, 64},
+      {192, 256, 128},
+      {256, 256, 128},
   };
 
-  // On SM90+ (Hopper/Blackwell) prefer larger tiles
-  if (cc >= 90) {
-    candidates.insert(candidates.begin(), {256, 256, 128});
-    candidates.insert(candidates.begin(), {192, 256, 128});
+  // On SM90+ (Hopper/Blackwell) use occupancy-first ordering above;
+  // On older devices keep the original throughput-first ordering.
+  if (cc < 90) {
+    candidates = {
+        {128, 256, 128},
+        {128, 128, 128},
+        {64, 256, 128},
+        {64, 128, 128},
+        {128, 256, 64},
+        {64, 256, 64},
+    };
   }
 
   for (auto const& [tile_m, tile_n, tile_k] : candidates) {
@@ -179,7 +196,7 @@ static inline std::tuple<int, int, int> get_optimal_tile_size(
                               : (tile_m + tile_n) * R * 2;  // fp16
     int const C_union_size = std::max(C_size, AxEB_size);
     int const scale_size = (tile_m + tile_n) * 4;  // fp32
-    int const rest_size = 64;
+    static constexpr int rest_size = 32;
 
     int const max_stages = (smem_size - (C_union_size + scale_size + rest_size)) / AB_one_stage_size;
     if (max_stages >= 2) {
@@ -191,17 +208,29 @@ static inline std::tuple<int, int, int> get_optimal_tile_size(
 }
 
 // ---------------------------------------------------------------------------
-// get_num_k_blocks — UNCHANGED
-// Wave-efficiency heuristic for split-K noising kernels.
+// get_num_k_blocks — OPT-I: Split-K occupancy optimization
+//
+// On SM90+ (H100/H200/RTX 5090) the 4 Tensor Core units per SM need
+// 4+ concurrent warp groups to stay fully utilized.  A single no-split
+// CTA per MN tile leaves units idle.  This version enforces a minimum
+// number of K-splits on SM90+ to increase total CTA count, and raises
+// desired_CTAs_per_SM from 2 → 4 to match the 4 Tensor Core units.
+//
+// Wave-efficiency threshold is lowered on SM90+ (0.5 instead of 0.8)
+// because we accept slightly less wave efficiency in exchange for
+// higher occupancy — the Tensor Core units are worth more than perfect
+// scheduling on a compute-bound kernel.
 // ---------------------------------------------------------------------------
 static inline int get_num_k_blocks(int MN, int tile_size_mn, int K,
-                                   int tile_size_k,
-                                   cudaDeviceProp const* const dprops) {
+                                    int tile_size_k,
+                                    cudaDeviceProp const* const dprops) {
   int k_blocks_per_tile = ceil_div(K, tile_size_k);
   int total_num_blocks  = ceil_div(MN, tile_size_mn) * k_blocks_per_tile;
   int num_sms           = dprops->multiProcessorCount;
+  int const cc = dprops->major * 10 + dprops->minor;
 
-  int desired_CTAs_per_SM = 2;
+  // On SM90+ target 4 CTAs/SM (matches 4 Tensor Core units), else 2.
+  int desired_CTAs_per_SM = (cc >= 90) ? 4 : 2;
   int num_ctas            = desired_CTAs_per_SM * num_sms;
 
   auto get_num_waves = [&](int num_k_blocks_per_split) {
@@ -214,12 +243,17 @@ static inline int get_num_k_blocks(int MN, int tile_size_mn, int K,
     return waves / std::ceil(waves);
   };
 
-  // If we can get almost 1 full wave without splitting, do so
-  if (get_num_waves(k_blocks_per_tile) >= 0.8f) {
+  // Lower the no-split threshold on SM90+: accept ~50% wave efficiency
+  // in exchange for higher CTA count and occupancy.  On older devices
+  // keep the original strict 0.8 threshold.
+  float const waves_threshold = (cc >= 90) ? 0.5f : 0.8f;
+
+  if (get_num_waves(k_blocks_per_tile) >= waves_threshold) {
     return 0;
   }
 
   float best_wave_efficiency = 0.f;
+  int   best_num_splits       = 2;
   std::vector<float> wave_efficiencies;
   wave_efficiencies.reserve(k_blocks_per_tile);
   for (int num_splits = 2; num_splits < k_blocks_per_tile; ++num_splits) {
@@ -227,6 +261,7 @@ static inline int get_num_k_blocks(int MN, int tile_size_mn, int K,
     float wave_efficiency        = get_wave_efficiency(num_k_blocks_per_split);
     if (wave_efficiency > best_wave_efficiency) {
       best_wave_efficiency = wave_efficiency;
+      best_num_splits       = num_splits;
     }
     wave_efficiencies.push_back(wave_efficiency);
   }
@@ -235,5 +270,5 @@ static inline int get_num_k_blocks(int MN, int tile_size_mn, int K,
       return ceil_div(k_blocks_per_tile, num_splits);
     }
   }
-  return 0;
+  return best_num_splits;
 }
