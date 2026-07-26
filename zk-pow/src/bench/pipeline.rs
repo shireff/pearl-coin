@@ -61,8 +61,8 @@ impl PipelineSimulator {
             self.problem.n,
             self.problem.k,
             self.problem.rank,
-            self.problem.tile_h,
-            self.problem.tile_w,
+            self.problem.gemm_tile_h,
+            self.problem.gemm_tile_w,
             self.problem.tile_k,
             5,
         );
@@ -104,9 +104,13 @@ impl PipelineSimulator {
         );
         kernel_metrics.push(inner_hash_metrics.clone());
 
-        let total_time_us = kernel_metrics.iter()
+        // Use critical-path (max kernel latency) rather than summing all
+        // kernel latencies. In realistic fused/persistent execution the
+        // dominant kernel determines batch time, not the arithmetic sum.
+        let total_time_us = kernel_metrics
+            .iter()
             .map(|k| k.estimated_time_us)
-            .sum::<f64>();
+            .fold(0.0_f64, |a, b| a.max(b));
 
         stage_metrics.push(StageMetrics {
             name: "Candidate Generation",
@@ -145,17 +149,17 @@ impl PipelineSimulator {
             });
         } else {
             stage_metrics.push(StageMetrics {
-                name: "Jackpot Mining",
+                name: "GPU Mining Kernel",
                 latency_us: mining_metrics.estimated_time_us,
                 percentage: mining_metrics.estimated_time_us / total_time_us * 100.0,
-                reason: "Scalar jackpot tile evaluation",
+                reason: "Persistent GPU mining kernel with CP.async loads and warp XOR reduction",
             });
             if let Some(hash_metrics) = hash_metrics {
                 stage_metrics.push(StageMetrics {
-                    name: "BLAKE3 Hash",
+                    name: "GPU BLAKE3 Hash",
                     latency_us: hash_metrics.estimated_time_us,
                     percentage: hash_metrics.estimated_time_us / total_time_us * 100.0,
-                    reason: "Separate BLAKE3 keyed hash kernel",
+                    reason: "Separate BLAKE3 keyed hash kernel after mining",
                 });
             }
         }

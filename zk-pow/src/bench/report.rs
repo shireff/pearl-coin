@@ -125,8 +125,9 @@ impl PerfBenchmark {
         if self.measured_batch_times_us.len() < 2 {
             return 0.0;
         }
+        // Compute per-run throughput in TMAC/s (Tera MACs/sec)
         let throughputs: Vec<f64> = self.measured_batch_times_us.iter()
-            .map(|&t| self.total_operations() as f64 / (t / 1e6) / 1e9)
+            .map(|&t| self.total_operations() as f64 / (t / 1e6) / 1e12)
             .collect();
         let mean = throughputs.iter().sum::<f64>() / throughputs.len() as f64;
         let variance = throughputs.iter()
@@ -136,13 +137,20 @@ impl PerfBenchmark {
     }
 
     fn total_operations(&self) -> usize {
-        self.problem.batch_size * self.problem.num_combos() * self.problem.tile_h * self.problem.tile_w
+        // Use total MACs for the batch: batch_size * m * n * k * 2
+        let macs = (self.problem.batch_size as u128)
+            * (self.problem.m as u128)
+            * (self.problem.n as u128)
+            * (self.problem.k as u128)
+            * 2u128;
+        macs as usize
     }
 
     fn throughput_for_ops(&self, time_us: f64) -> f64 {
         let batch_time_sec = time_us / 1e6;
         let total_ops = self.total_operations() as f64;
-        total_ops / batch_time_sec / 1e9
+        // Return TMAC/s (divide MACs/sec by 1e12)
+        total_ops / batch_time_sec / 1e12
     }
 
     pub fn p95_confidence_interval(&self) -> (f64, f64) {
@@ -160,7 +168,7 @@ impl PerfBenchmark {
         let total_ops = self.total_operations() as f64;
         let mut above = 0usize;
         for &time_us in &self.measured_batch_times_us {
-            let throughput = total_ops / (time_us / 1e6) / 1e9;
+            let throughput = total_ops / (time_us / 1e6) / 1e12;
             if throughput >= threshold {
                 above += 1;
             }

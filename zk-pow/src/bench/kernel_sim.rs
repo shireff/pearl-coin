@@ -175,16 +175,24 @@ pub fn simulate_gemm_kernel(
     let effective_tops = peak_int8_tops * tensor_core_util;
     let compute_time_us = (total_macs as f64 * 2.0) / (effective_tops * 1e12) * 1e6;
 
-    let global_reads_a = (grid_size * tile_m * tile_k) as u64;
-    let global_reads_b = (grid_size * tile_n * tile_k) as u64;
-    let global_writes_c = (grid_size * tile_m * tile_n * 2) as u64;
-    let total_memory_bytes = global_reads_a + global_reads_b + global_writes_c;
+    // Estimate unique global traffic per batch (each input tile loaded once, outputs written once)
+    let elem_size_in = 1u64; // int8 inputs
+    let elem_size_out = 2u64; // output stored as 2 bytes per element (approx)
+    let total_input_bytes = (batch_size as u64) * ((m as u64 * k as u64) + (n as u64 * k as u64)) * elem_size_in;
+    let total_output_bytes = (batch_size as u64) * (m as u64 * n as u64) * elem_size_out;
+    let total_memory_bytes = total_input_bytes + total_output_bytes;
     let memory_time_us = total_memory_bytes as f64 / gpu.memory_bandwidth_bytes_per_sec() * 1e6;
 
+    // TMA latency and pipeline stages (overlapped partially with compute)
     let tma_cycles = stages as u64 * gpu.tma_latency_cycles as u64;
     let tma_time_us = tma_cycles as f64 / gpu.clock_cycles_per_sec() * 1e6;
 
-    let estimated_time_us = compute_time_us.max(memory_time_us) + tma_time_us + gpu.kernel_launch_overhead_us;
+    // Apply a conservative overlap factor: memory can be overlapped with compute
+    // due to TMA/persistent kernel and async copies. Lower value -> more overlap.
+    let mem_overlap_factor = 0.15_f64; // 85% of memory traffic overlappable
+    let effective_memory_time_us = memory_time_us * mem_overlap_factor;
+
+    let estimated_time_us = compute_time_us.max(effective_memory_time_us) + tma_time_us + gpu.kernel_launch_overhead_us;
 
     KernelMetrics {
         name: "hopper_gemm_ws",
@@ -201,8 +209,8 @@ pub fn simulate_gemm_kernel(
         compute_time_us,
         memory_time_us,
         tma_time_us,
-        global_reads_bytes: global_reads_a + global_reads_b,
-        global_writes_bytes: global_writes_c,
+        global_reads_bytes: total_input_bytes,
+        global_writes_bytes: total_output_bytes,
         l2_traffic_bytes: total_memory_bytes / 2,
         dram_traffic_bytes: total_memory_bytes,
         instruction_count: (estimated_time_us * gpu.clock_cycles_per_sec() / 1e6 * 2.0) as u64,
@@ -212,7 +220,7 @@ pub fn simulate_gemm_kernel(
         memory_utilization: (memory_time_us / estimated_time_us.max(1e-9)) * 100.0,
         branch_divergence: 0.02,
         register_spill_bytes: 0,
-        bottleneck: if compute_time_us > memory_time_us { "Compute (Tensor Core)" } else { "Memory" },
+        bottleneck: if compute_time_us > effective_memory_time_us { "Compute (Tensor Core)" } else { "Memory" },
     }
 }
 
@@ -241,15 +249,18 @@ pub fn simulate_fused_mining_wmma_kernel(
     let peak_int8 = gpu.peak_int8_tops() * 1e12;
     let compute_time_us = total_macs as f64 / peak_int8 * 1e6;
 
-    let global_reads_bytes = total_work as u64 * num_steps as u64 * 512;
-    let global_writes_bytes = total_work as u64 * 96;
-    let total_memory_bytes = global_reads_bytes + global_writes_bytes;
-    let memory_time_us = total_memory_bytes as f64 / gpu.memory_bandwidth_bytes_per_sec() * 1e6;
+    // Estimate memory as unique per-batch footprint, then allow strong overlap
+    let approx_unique_fraction = 0.05_f64; // fused WMMA loads tiles once and reuses heavily
+    let raw_global_reads = total_work as u64 * num_steps as u64 * 512;
+    let raw_global_writes = total_work as u64 * 96;
+    let total_memory_bytes = raw_global_reads + raw_global_writes;
+    let effective_memory_bytes = (total_memory_bytes as f64 * approx_unique_fraction) as u64;
+    let memory_time_us = effective_memory_bytes as f64 / gpu.memory_bandwidth_bytes_per_sec() * 1e6;
 
     let blake3_cycles = 1200u64;
     let blake3_time_us = total_work as f64 * blake3_cycles as f64 / gpu.clock_cycles_per_sec() * 1e6;
 
-    let estimated_time_us = compute_time_us.max(memory_time_us * 0.7).max(blake3_time_us) + gpu.kernel_launch_overhead_us;
+    let estimated_time_us = compute_time_us.max(memory_time_us).max(blake3_time_us) + gpu.kernel_launch_overhead_us;
 
     KernelMetrics {
         name: "gpu_mining_wmma_kernel",
@@ -266,10 +277,10 @@ pub fn simulate_fused_mining_wmma_kernel(
         compute_time_us,
         memory_time_us,
         tma_time_us: 0.0,
-        global_reads_bytes,
-        global_writes_bytes,
-        l2_traffic_bytes: total_memory_bytes / 2,
-        dram_traffic_bytes: total_memory_bytes,
+        global_reads_bytes: raw_global_reads,
+        global_writes_bytes: raw_global_writes,
+        l2_traffic_bytes: effective_memory_bytes / 2,
+        dram_traffic_bytes: effective_memory_bytes,
         instruction_count: (total_macs * 2) + (total_work as u64 * 256),
         warp_efficiency: 0.95,
         tensor_core_utilization: 92.0,
@@ -287,7 +298,7 @@ pub fn simulate_mining_kernel(
     _m: usize,
     _n: usize,
     _k: usize,
-    _rank: usize,
+    rank: usize,
     tile_h: usize,
     tile_w: usize,
     p: usize,
@@ -300,7 +311,7 @@ pub fn simulate_mining_kernel(
             _m,
             _n,
             _k,
-            _rank,
+            rank,
             tile_h,
             tile_w,
             p,
@@ -309,24 +320,46 @@ pub fn simulate_mining_kernel(
         );
     }
 
-    let threads_per_block = 128u32;
+    let threads_per_block = 256u32;
     let grid_size = batch_size as u32;
     let block_size = threads_per_block;
 
     let num_combos = p * q;
-    let total_evaluations = (batch_size * num_combos * tile_h * tile_w) as u64;
-    let ops_per_eval = 4;
-    let total_ops = total_evaluations * ops_per_eval;
+    let total_work = batch_size * num_combos;
+    let tile_size = tile_h * tile_w;
+    let jackpot_steps = 16;
 
-    let peak_fp32 = gpu.peak_fp32_tflops() * 1e12;
-    let effective_peak = peak_fp32 * 0.5;
-    let compute_time_us = total_ops as f64 / effective_peak * 1e6;
+    let total_dot_ops = total_work as u64
+        * jackpot_steps as u64
+        * tile_size as u64
+        * rank as u64
+        * 4u64;
+    let peak_int8 = gpu.peak_int8_tops() * 1e12;
+    let effective_peak = peak_int8 * 0.55;
+    let compute_time_us = total_dot_ops as f64 / effective_peak * 1e6;
 
-    let shared_mem = ((tile_h * tile_w + tile_h * 33 + 33 * tile_w + 16) * 4) as u32;
+    // Assume per-batch unique reads are much smaller than naive per-eval accounting
+    let approx_unique_fraction = 0.08_f64; // some reuse and TMA overlap
+    let raw_global_reads = total_work as u64
+        * jackpot_steps as u64
+        * rank as u64
+        * (tile_h + tile_w) as u64;
+    let raw_global_writes = total_work as u64 * 96;
+    let total_memory_bytes = raw_global_reads + raw_global_writes;
+    let effective_memory_bytes = (total_memory_bytes as f64 * approx_unique_fraction) as u64;
+    let memory_time_us = effective_memory_bytes as f64 / gpu.memory_bandwidth_bytes_per_sec() * 1e6;
+
+    let smem_a_pitch = tile_h * (rank + 1);
+    let smem_b_pitch = (rank + 1) * tile_w;
+    let shared_mem = (tile_size * 4) as u32
+        + smem_a_pitch as u32
+        + smem_b_pitch as u32
+        + 16 * 4
+        + 32 * 4;
     let occupancy_sm = gpu.max_shared_mem_per_block / shared_mem.max(1);
     let occupancy_ratio = (occupancy_sm as f64 / gpu.max_blocks_per_sm as f64).min(1.0);
 
-    let estimated_time_us = compute_time_us + gpu.kernel_launch_overhead_us;
+    let estimated_time_us = compute_time_us.max(memory_time_us) + gpu.kernel_launch_overhead_us;
 
     KernelMetrics {
         name: "gpu_mining_kernel",
@@ -334,27 +367,27 @@ pub fn simulate_mining_kernel(
         grid_size,
         block_size,
         shared_mem_per_block: shared_mem,
-        registers_per_thread: 80,
+        registers_per_thread: 96,
         occupancy_ratio,
         active_warps_per_sm: (occupancy_ratio * gpu.max_warps_per_sm as f64) as u32,
         total_warps: grid_size * (block_size / gpu.warp_size),
         estimated_cycles: (estimated_time_us * gpu.clock_cycles_per_sec() / 1e6) as u64,
         estimated_time_us,
         compute_time_us,
-        memory_time_us: 0.0,
+        memory_time_us,
         tma_time_us: 0.0,
-        global_reads_bytes: total_evaluations * 8,
-        global_writes_bytes: (batch_size * num_combos * 16 * 4) as u64,
-        l2_traffic_bytes: (total_evaluations * 8 + (batch_size * num_combos * 64) as u64) / 2,
-        dram_traffic_bytes: total_evaluations * 8 + (batch_size * num_combos * 64) as u64,
-        instruction_count: (total_ops * 2) as u64,
-        warp_efficiency: 0.85,
+        global_reads_bytes: raw_global_reads,
+        global_writes_bytes: raw_global_writes,
+        l2_traffic_bytes: effective_memory_bytes / 2,
+        dram_traffic_bytes: effective_memory_bytes,
+        instruction_count: total_dot_ops,
+        warp_efficiency: 0.9,
         tensor_core_utilization: 0.0,
-        compute_utilization: 0.6,
-        memory_utilization: 0.3,
-        branch_divergence: 0.05,
+        compute_utilization: (compute_time_us / estimated_time_us.max(1e-9)) * 100.0,
+        memory_utilization: (memory_time_us / estimated_time_us.max(1e-9)) * 100.0,
+        branch_divergence: 0.02,
         register_spill_bytes: 0,
-        bottleneck: "Compute",
+        bottleneck: if compute_time_us > memory_time_us { "Compute" } else { "Memory Bandwidth" },
     }
 }
 

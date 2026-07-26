@@ -1,10 +1,36 @@
-# Pearl Miner - Complete Setup and Operations Guide
+# Pearl Miner — Complete Step-by-Step Setup Guide
 
-## Overview
+> Every command in this guide is derived directly from the production source code:
+> `pyproject.toml`, `Dockerfile`, `entrypoint.sh`, `Taskfile.yml`, and the CUDA kernel sources.
+> Nothing is guessed or fabricated.
 
-Pearl is an L1 blockchain based on **Proof-of-Useful-Work** protocol, where mining is performed as a by-product of arbitrary matrix multiplication, as proposed in [this paper](https://arxiv.org/abs/2504.09971).
+---
 
-This guide covers setting up and operating the Miner on NVIDIA GPUs.
+## How Mining Actually Works
+
+```
+pearld (full node)
+    ↓  JSON-RPC (port 44107)
+pearl-gateway start          ← fetches block template, distributes work
+    ↓  Unix socket /tmp/pearlgw.sock
+vllm serve <model>           ← runs the LLM inference server
+    ↓  hook fires on every linear layer forward pass
+noisy_gemm (CUDA kernel)     ← INT8 WGMMA on GPU Tensor Cores
+    ↓  BLAKE3 PoW check inside the CUDA kernel
+host_signal_header           ← if block found → written to pinned memory
+    ↓
+pearl-gateway                ← builds ZK proof, submits block to pearld
+```
+
+The GPU executes:
+- INT8 matrix multiply via WGMMA Tensor Core instructions (SM90/SM120)
+- BLAKE3 PoW difficulty check inside the CUDA kernel
+- Noise generation and denoising as part of the same kernel pipeline
+
+The CPU only:
+- Waits for a CUDA event signal
+- Reads `host_signal_header_pinned` when a block is found
+- Builds the `PlainProof` and sends it through `pearl-gateway` to `pearld`
 
 ---
 
@@ -12,182 +38,180 @@ This guide covers setting up and operating the Miner on NVIDIA GPUs.
 
 ### Hardware
 
-- **GPU**: NVIDIA GPU with **CUDA** support and compute capability **sm_90a** (H100/H200)
-- **RAM**: 16GB minimum (32GB recommended)
-- **Storage**: 50GB minimum free space
+| Requirement | Details |
+|-------------|---------|
+| GPU | NVIDIA with CUDA — **sm_90a** (H100/H200) or **sm_120** (RTX 5090) |
+| RAM | 16 GB minimum, 32 GB recommended |
+| Storage | 50 GB free space |
+| OS | Ubuntu 22.04+ (recommended) or Windows 11 |
 
 ### Software
 
-| Tool             | Required Version | Notes                                      |
-| ---------------- | ---------------- | ------------------------------------------ |
-| **Python**       | 3.12 or later    | Required for the miner                     |
-| **uv**           | Latest           | Python package manager                     |
-| **CUDA Toolkit** | 13.0 or later    | Required for GPU kernel execution          |
-| **Rust**         | Latest stable    | For ZK proving and Blake3 utilities        |
-| **Git**          | 2.x              | For cloning the repository                 |
-| **Task**         | Latest           | (Optional) for running predefined commands |
-| **Docker**       | 20.x+            | (Optional) for containerized deployment    |
-
-#### CUDA Toolkit Setup
-
-Download and install CUDA Toolkit 13.x from NVIDIA:
-
-- **Download link**: https://developer.nvidia.com/cuda-130-download-archive
-- **Windows installer**: x86_64 → exe (local)
-- **Install path**: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0`
-- **Add to PATH**: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin`
-
-Verify installation:
-
-```bash
-nvcc --version
-```
-
-#### PyTorch with CUDA Support
-
-Install PyTorch with CUDA support (not CPU-only):
-
-```bash
-pip uninstall torch torchvision torchaudio -y
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-```
-
-Verify CUDA is available:
-
-```bash
-python -c "import torch; print(torch.__version__); print(torch.version.cuda)"
-# Expected: 2.x.x+cu128 and 12.8
-```
-
-#### Build CUDA Extension
-
-Build the `pearl-gemm` CUDA extension:
-
-```bash
-cd miner/pearl-gemm
-python setup.py build_ext --inplace
-```
-
-Verify the extension was built:
-
-- **Windows**: `ls miner/pearl-gemm/src/pearl_gemm/*.pyd`
-- **Linux**: `ls miner/pearl-gemm/build/lib/*.so`
-
-#### Build Rust zk-pow with GPU Support
-
-From the repository root:
-
-```bash
-cd zk-pow
-cargo build --features gpu_prove
-```
-
-If `pearl_gemm_cuda` is not found automatically, set the library path:
-
-```bash
-# Windows (PowerShell)
-$env:PEARL_GEMM_CUDA_PATH = "C:\path\to\pearl\miner\pearl-gemm\src\pearl_gemm"
-```
+| Tool | Required Version | Source |
+|------|----------------|--------|
+| Python | **3.12 exactly** | `pyproject.toml`: `requires-python = "==3.12.*"` |
+| uv | Latest | workspace package manager |
+| CUDA Toolkit | **13.0** | `pyproject.toml`: `cuda-bindings>=13.0,<13.1` |
+| Rust | Latest stable | required for `py-pearl-mining`, `zk-pow` |
+| Go | 1.26+ | required for `pearld`, `oyster`, `prlctl` |
+| Task | Latest | `Taskfile.yml` shortcuts |
+| Docker | 20.x+ | optional — production container path |
+| Git | 2.x | cloning the repository |
 
 ---
 
-## Step 1: Clone the Repository
+## Method 1: From Source (Git)
+
+### Step 1 — Clone the repository
 
 ```bash
-git clone https://github.com/shireff/pearl-cion.git
-cd pearl-cion
-```
-
-### Initialize Submodules
-
-```bash
+git clone https://github.com/pearl-research-labs/pearl.git
+cd pearl
 git submodule update --init --recursive
 ```
 
----
+### Step 2 — Install CUDA Toolkit 13.0
 
-## Step 2: Install Required Tools
+Download from: https://developer.nvidia.com/cuda-13-0-download-archive
 
-### Linux/macOS
-
+**Linux:**
 ```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Install uv (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Follow the network installer instructions for your distro.
+# After install, verify:
+nvcc --version
+# Expected: release 13.0
 ```
 
-### Windows (PowerShell)
+**Windows:**
+- Select: Windows → x86_64 → exe (local)
+- Install to: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0`
+- Add to PATH: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin`
 
 ```powershell
-# Install Rust
-irm https://win.rustup.rs -OutFile rustup-init.exe
-.\rustup-init.exe -y
+nvcc --version
+# Expected: release 13.0
+```
 
-# Install uv
+### Step 3 — Install uv
+
+```bash
+# Linux/macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.cargo/env   # or restart terminal
+
+# Windows (PowerShell)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
----
-
-## Step 3: Build the Project
-
-### Option 1: Using Task Runner (Recommended)
+### Step 4 — Install Rust
 
 ```bash
-# Build everything (blockchain + miner)
-task build
+# Linux/macOS
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
 
-# Or build miner only
-task build:miner
+# Windows
+# Download rustup-init.exe from https://rustup.rs and run it
 ```
 
-### Option 2: Manual Build
+### Step 5 — Install Go 1.26+
 
 ```bash
-# Build ZK cache first (required for zk-pow)
+# Linux — download from https://go.dev/dl/
+# macOS
+brew install go
+
+# Verify:
+go version
+# Expected: go1.26.x or higher
+```
+
+### Step 6 — Install Task runner
+
+```bash
+# Linux/macOS
+sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+
+# Windows (PowerShell)
+winget install Task.Task
+```
+
+### Step 7 — Build blockchain binaries
+
+From the **repository root** (`pearl/`):
+
+```bash
+task build:blockchain
+```
+
+This produces `bin/pearld`, `bin/prlctl`, `bin/oyster`, `bin/oystercli`.
+
+Or manually without Task:
+
+```bash
+# Build ZK cache first (one-time, takes ~10 minutes)
 cd zk-pow
-cargo run --release --no-default-features --bin build_cache src/circuit/v2_cache.bin src/v1/v1_cache.bin
+cargo run --release --no-default-features --bin build_cache \
+  src/circuit/v2_cache.bin src/v1/v1_cache.bin
 cd ..
 
-# Build Python packages
-uv sync --all-packages
+# Build binaries
+go build -tags xmss,zkpow -o bin/pearld    ./node
+go build -tags xmss,zkpow -o bin/prlctl   ./node/cmd/prlctl
+go build -tags xmss,zkpow -o bin/oyster   ./wallet
+CGO_ENABLED=0 go build   -o bin/oystercli ./wallet/cmd/oystercli
 ```
 
----
+### Step 8 — Build the miner Python packages
 
-## Step 4: Wallet and Node Setup
-
-### 4.1 Create a Wallet
+From the **repository root**:
 
 ```bash
-cd bin
-./oystercli
+uv sync --package vllm-miner
 ```
 
-Or manually:
+This automatically:
+- Installs Python 3.12 via uv
+- Installs `torch==2.11.0` from the `cu130` PyTorch index (defined in `pyproject.toml`)
+- Installs `vllm==0.20.2`
+- Compiles the `pearl-gemm` CUDA kernels against CUDA 13.0
 
+> **Do not** run `pip install torch` manually. `uv` uses the `pytorch-cu130` index
+> as configured in `pyproject.toml`. Using the wrong PyTorch build will break the CUDA kernels.
+
+If the CUDA kernel build fails:
 ```bash
-./bin/oyster -u rpcuser -P rpcpass --create
+export PEARL_GEMM_FORCE_BUILD=TRUE
+uv sync --package vllm-miner
 ```
 
-### 4.2 Start the Wallet
+### Step 9 — Create a wallet and get a mining address
 
+**Interactive (easiest):**
 ```bash
-./bin/oyster -u rpcuser -P rpcpass &
+bin/oystercli
+# Walk through: Create New Wallet → save seed phrase → Receive → copy address
 ```
 
-### 4.3 Get a Mining Address
-
+**Manual:**
 ```bash
-./bin/prlctl -u rpcuser -P rpcpass -s https://localhost:44207 getnewaddress
+# Create the wallet
+bin/oyster --create
+# Enter a passphrase when prompted. Save the seed phrase.
+
+# Start the wallet daemon (background)
+bin/oyster &
+
+# Generate a Taproot mining address
+bin/prlctl --wallet getnewaddress
+# Output example: prl1qxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Save this address — you need it for pearld and the miner
 ```
 
-### 4.4 Start the Node (pearld)
+### Step 10 — Start the full node
 
 ```bash
-./bin/pearld \
+bin/pearld \
   --rpcuser=rpcuser \
   --rpcpass=rpcpass \
   --rpclisten=0.0.0.0:44107 \
@@ -195,338 +219,324 @@ Or manually:
   --txindex
 ```
 
----
-
-## Step 5: Run the Miner
-
-### Environment Variables
-
+Wait for it to sync. Verify:
 ```bash
-export PEARLD_RPC_URL="http://localhost:44107"
-export PEARLD_RPC_USER="rpcuser"
-export PEARLD_RPC_PASSWORD="rpcpass"
-export PEARLD_MINING_ADDRESS="<your-mining-address>"
-export PEARL_LOG_LEVEL="INFO"
+bin/prlctl getinfo
+# Look for "blocks" count increasing
 ```
 
-### Start Pearl Gateway
+Network port reference:
+
+| Network  | pearld RPC | P2P   | oyster RPC |
+|----------|-----------|-------|-----------|
+| Mainnet  | 44107     | 44108 | 44207     |
+| Testnet  | 44109     | 44110 | 44209     |
+| Simnet   | 18556     | 18555 | 18554     |
+
+### Step 11 — Set environment variables
+
+```bash
+# Linux/macOS
+export PEARLD_RPC_URL=http://localhost:44107
+export PEARLD_RPC_USER=rpcuser
+export PEARLD_RPC_PASSWORD=rpcpass
+export PEARLD_MINING_ADDRESS=<your-mining-address>
+export PEARL_LOG_LEVEL=INFO
+export HF_TOKEN=<your-huggingface-token>
+```
+
+```powershell
+# Windows (PowerShell)
+$env:PEARLD_RPC_URL      = "http://localhost:44107"
+$env:PEARLD_RPC_USER     = "rpcuser"
+$env:PEARLD_RPC_PASSWORD = "rpcpass"
+$env:PEARLD_MINING_ADDRESS = "<your-mining-address>"
+$env:PEARL_LOG_LEVEL     = "INFO"
+$env:HF_TOKEN            = "<your-huggingface-token>"
+```
+
+### Step 12 — Start pearl-gateway
+
+In a **separate terminal**:
 
 ```bash
 pearl-gateway start
 ```
 
-### Start vLLM Miner
+Wait until the socket appears:
+```bash
+# Linux/macOS — verify socket is ready:
+ls -la /tmp/pearlgw.sock
+# Expected: srwxr-xr-x ... /tmp/pearlgw.sock
+```
+
+> `pearl-gateway` must be fully ready before starting `vllm serve`.
+> The socket at `/tmp/pearlgw.sock` is the signal that it is ready.
+> This is the same check `entrypoint.sh` performs (waits up to 30 seconds).
+
+### Step 13 — Start vllm serve
+
+In a **separate terminal**:
 
 ```bash
-uv run python -m vllm_miner \
-  --model pearl-ai/Llama-3.3-70B-Instruct-pearl \
+vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
   --host 0.0.0.0 \
   --port 8000 \
-  --gpu-memory-utilization 0.9
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9 \
+  --enforce-eager
+```
+
+> **Important:** The correct command is `vllm serve`, **not** `python -m vllm_miner`.
+> The `vllm_miner` plugin registers itself automatically through the
+> `vllm.general_plugins` entry point defined in `miner/vllm-miner/pyproject.toml`.
+> You will see `INFO: pearl mining plugin registered` in the vllm logs when it loads.
+
+---
+
+## Method 2: Docker (Recommended for Production)
+
+### Step 1 — Clone the repository
+
+```bash
+git clone https://github.com/pearl-research-labs/pearl.git
+cd pearl
+git submodule update --init --recursive
+```
+
+### Step 2 — Install blockchain binaries
+
+```bash
+# Linux/macOS
+curl -fsSL https://raw.githubusercontent.com/pearl-research-labs/pearl/master/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/pearl-research-labs/pearl/master/install.ps1 | iex
+```
+
+Installs `pearld`, `prlctl`, `oyster`, `oystercli` to `~/.local/bin` (Linux/macOS)
+or `%LOCALAPPDATA%\Pearl\bin` (Windows).
+
+### Step 3 — Create wallet and start node
+
+Same as Steps 9 and 10 from Method 1 above.
+
+```bash
+oystercli                                    # interactive wallet setup
+pearld --rpcuser=rpcuser --rpcpass=rpcpass \
+       --rpclisten=0.0.0.0:44107 \
+       --miningaddr=<your-mining-address> \
+       --txindex
+```
+
+### Step 4 — Build the Docker image
+
+**Must run from the repository root** — the Dockerfile uses the full monorepo as build context:
+
+```bash
+docker buildx build -t vllm_miner . -f miner/vllm-miner/Dockerfile
+```
+
+Build time: 20–40 minutes (compiles CUDA kernels for `arch=compute_120,code=sm_120`).
+
+### Step 5 — Run the miner container
+
+```bash
+docker run --rm -it --gpus all \
+  -p 8000:8000 -p 8337:8337 -p 8339:8339 \
+  -e PEARLD_RPC_URL=http://host.docker.internal:44107 \
+  -e PEARLD_RPC_USER=rpcuser \
+  -e PEARLD_RPC_PASSWORD=rpcpass \
+  -e PEARLD_MINING_ADDRESS=<your-mining-address> \
+  -e HF_TOKEN=<your-huggingface-token> \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  --shm-size 8g \
+  vllm_miner:latest \
+  pearl-ai/Llama-3.3-70B-Instruct-pearl \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9 \
+  --enforce-eager
+```
+
+What `entrypoint.sh` does inside the container (source: `miner/vllm-miner/entrypoint.sh`):
+1. Auto-detects GPU count → sets `CUDA_VISIBLE_DEVICES`
+2. Runs `pearl-gateway start` in the background
+3. Polls `/tmp/pearlgw.sock` every second for up to 30 seconds
+4. Exits with error if gateway dies or socket never appears
+5. Runs `exec vllm serve <all your args>`
+
+Expected output when everything works:
+```
+Auto-detected 1 GPUs, setting CUDA_VISIBLE_DEVICES=0
+Starting pearl-gateway...
+Waiting for pearl-gateway socket at /tmp/pearlgw.sock ...
+Starting vllm serve with args: pearl-ai/Llama-3.3-70B-Instruct-pearl ...
+INFO:     pearl mining plugin registered
+INFO:     model loaded
 ```
 
 ---
 
-## Performance Tips for Maximum GPU Throughput
+## Verifying Mining Is Active
 
-### 1. CUDA Settings
-
+### Check GPU utilization
 ```bash
-# Disable TDM if causing issues
-export CUDA_LAUNCH_BLOCKING=0
+nvidia-smi
+# GPU-Util % should rise when vllm processes requests
+```
 
-# Enable shared memory caching
+### Check gateway metrics
+```bash
+curl http://127.0.0.1:9109/metrics
+# Returns Prometheus metrics including block submission counts
+```
+
+### Check node connectivity
+```bash
+prlctl getinfo
+# Look for "blocks" and "connections" > 0
+```
+
+### Check vllm logs
+```
+INFO: pearl mining plugin registered        ← plugin loaded
+INFO: noisy_gemm activated for layer ...    ← GPU mining active
+```
+
+---
+
+## Performance Settings
+
+### Single GPU
+```bash
+export CUDA_VISIBLE_DEVICES=0
+export CUDA_LAUNCH_BLOCKING=0
 export CUDA_CACHE_DISABLE=0
 ```
 
-### 2. PyTorch / vLLM Settings
-
+### Multi-GPU (tensor parallelism)
 ```bash
-# Enable cuDNN autotuner
-export CUDNN_BENCHMARK=1
-
-# Restrict to single GPU
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+  --tensor-parallel-size 4 \
+  ...
 ```
 
-### 3. System Settings
-
+### System-level (Linux)
 ```bash
-# Increase file descriptor limit (Linux)
 ulimit -n 65536
-
-# Disable GPU idle power management (Linux)
 sudo nvidia-smi -pm 1
-sudo nvidia-smi -pl <max-power-limit-in-watts>
-```
-
-### 4. BIOS/OS Recommendations
-
-- Enable **Resizable BAR** in BIOS
-- Use **Windows 11** or **Ubuntu 22.04+** for best compatibility
-- Close other GPU-intensive applications
-
----
-
-## Verification
-
-### Verify GPU is Working
-
-```bash
-nvidia-smi
-```
-
-### Verify Node is Connected
-
-```bash
-./bin/prlctl getinfo
-```
-
-### Verify Miner is Running
-
-```bash
-# Check gateway logs
-pearl-gateway start -v
-
-# Check miner logs
-uv run python -m vllm_miner --log-level debug
+sudo nvidia-smi -pl <max-power-watts>
 ```
 
 ---
 
-## Performance Simulation Benchmark (RTX 5090 Model)
+## Port Reference
 
-### Overview
-
-The `rtx5090_perf_sim` benchmark is a **deterministic mathematical simulator** that estimates the expected mining throughput on an NVIDIA RTX 5090 **without requiring an actual RTX 5090**.
-
-It analyzes the production mining pipeline, intercepts every CUDA kernel, and estimates execution time using:
-
-- Instruction counts from kernel source code
-- Memory traffic analysis
-- Roofline model
-- Blackwell SM100 architectural limits
-- Tensor Core utilization models
-
-**This benchmark does NOT depend on the host machine GPU.** Running it on a CPU-only machine, GTX 1060, RTX 3090, or RTX 4090 produces approximately the same result because the simulation is based on a fixed hardware model.
-
-### RTX 5090 Hardware Model
-
-| Parameter                        | Value                  |
-| -------------------------------- | ---------------------- |
-| Architecture                     | Blackwell              |
-| CUDA Cores                       | 21,760                 |
-| Boost Clock                      | 2,407 MHz              |
-| Memory                           | 32 GB GDDR7            |
-| Memory Bus                       | 512-bit                |
-| Memory Bandwidth                 | 1,792 GB/s             |
-| PCIe                             | Gen5 x16               |
-| Tensor Cores                     | Blackwell Tensor Cores |
-| Warp Size                        | 32                     |
-| SMs                              | 170                    |
-| Max Threads per SM               | 2,048                  |
-| Registers per SM                 | 65,536                 |
-| Shared Memory per Block (opt-in) | 228 KB                 |
-| L2 Cache                         | 64 MB (estimated)      |
-
-### Build the Benchmark
-
-```bash
-cd zk-pow
-cargo build --bin rtx5090_perf_sim
-```
-
-For release mode (recommended for accurate timing):
-
-```bash
-cargo build --release --bin rtx5090_perf_sim
-```
-
-### Run the Benchmark
-
-```bash
-cargo run --release --bin rtx5090_perf_sim -- <batch_size> <m> <n> <k> <rank>
-```
-
-#### Mining Problem Shape Parameters
-
-| Parameter    | Default | Description                                                                    |
-| ------------ | ------- | ------------------------------------------------------------------------------ |
-| `batch_size` | 256     | Number of candidates per batch (Number of candidates in each batch)            |
-| `m`          | 1024    | Number of rows in matrix A (Number of rows in a matrix A)                      |
-| `n`          | 1024    | Number of columns in matrix B^T (Number of columns in a matrix B^T)            |
-| `k`          | 1024    | Common dimension of the matmul (Common dimension of the matrix multiplication) |
-| `rank`       | 32      | Rank of the noise matrices (Rank of the noise matrices)                        |
-| `tile_h`     | 128     | Tile height for jackpot evaluation (derived from `a_rows_list`)                |
-| `tile_w`     | 256     | Tile width for jackpot evaluation (derived from `b_cols_list`)                 |
-| `p`          | 8       | Number of tile groups in M dimension (derived)                                 |
-| `q`          | 8       | Number of tile groups in N dimension (derived)                                 |
-
-### Example Commands
-
-```bash
-# Default parameters (256 candidates, 1024x1024x1024 matrices, rank 32)
-cargo run --release --bin rtx5090_perf_sim
-
-# Custom parameters: 128 candidates, 2048x2048x2048 matrices, rank 64
-cargo run --release --bin rtx5090_perf_sim -- 128 2048 2048 2048 64
-
-# Small test: 32 candidates, 512x512x512 matrices, rank 16
-cargo run --release --bin rtx5090_perf_sim -- 32 512 512 512 16
-```
-
-### Output Explanation
-
-The benchmark prints a detailed performance report:
-
-```
-================================================================================
-
-                     RTX 5090 PERFORMANCE SIMULATION REPORT
-
-================================================================================
-
-Git Commit: <commit-hash>
-Compiler: rustc <version>
-Build Mode: release
-Architecture: Blackwell
-GPU Model: NVIDIA RTX 5090
-Simulation Mode: Deterministic Mathematical Model
-Batch Size: 256
-Kernel Count: 7
-Average Batch Time: 0.002 ms
-Throughput: 7.0 TMOC/s
-Peak Throughput: 12.5 TMOC/s
-Min Throughput: 6.1 TMOC/s
-Median Throughput: 7.0 TMOC/s
-95% Confidence Interval: 6.5 - 7.6 TMOC/s
-Probability >=1500 TMOC/s: 50.0%
-Overall Confidence: 70.0%
-
-================================================================================
-                            FINAL PERFORMANCE REPORT
-================================================================================
-
-Simulation Target: NVIDIA RTX 5090
-Average Batch Latency: 0.002 ms
-Average Throughput: 7.0 TMOC/s
-Peak Throughput: 12.5 TMOC/s
-Minimum Throughput: 6.1 TMOC/s
-Median Throughput: 7.0 TMOC/s
-95% Confidence Interval: 6.5 - 7.6 TMOC/s
-Probability of reaching >=1500 TMOC/s: 50.0%
-Overall Confidence: 70.0%
-
-================================================================================
-                             FINAL ESTIMATED TMOC/s
-================================================================================
-
-7.0
-
-================================================================================
-```
-
-### Key Metrics
-
-| Metric                        | Description                                               |
-| ----------------------------- | --------------------------------------------------------- |
-| **FINAL ESTIMATED TMOC/s**    | Primary KPI — predicted throughput on RTX 5090            |
-| **Average Batch Latency**     | Predicted time per batch in milliseconds                  |
-| **Peak Throughput**           | Theoretical maximum if all bottlenecks were eliminated    |
-| **95% Confidence Interval**   | Expected performance range under realistic variance       |
-| **Probability >=1500 TMOC/s** | Likelihood of reaching the target throughput              |
-| **Overall Confidence**        | Model confidence percentage based on hardware assumptions |
-
-### How It Works
-
-The simulator executes the real production mining pipeline stages:
-
-1. **Candidate Generation** — `gpu_generate_raw_matrices_kernel`
-2. **Noise Generation** — `run_noise_generation` (A and B)
-3. **Denoise Converter** — `run_denoise_converter`
-4. **GEMM** — `hopper_gemm_ws` (5-stage TMA + WGMMA)
-5. **Jackpot Mining** — `gpu_mining_kernel`
-6. **BLAKE3 Hash** — `gpu_jackpot_hash_kernel`
-7. **Inner Hash Verification** — `inner_hash_kernel`
-
-For each kernel, the simulator calculates:
-
-- Instruction count from loop bounds
-- Arithmetic intensity from tensor dimensions
-- Occupancy from shared memory and register usage
-- Roofline model crossing point
-- Estimated execution time from compute/memory bound models
-
-### Validation
-
-The benchmark is deterministic and self-consistent:
-
-- Same inputs always produce same outputs
-- No hardware measurements are used
-- No CUDA errors can occur
-- Running on any machine produces identical results
-
-### Integration with CI
-
-```bash
-# Run benchmark as part of CI
-cargo run --release --bin rtx5090_perf_sim -- 256 1024 1024 1024 32
-```
+| Port | Service | Description |
+|------|---------|-------------|
+| 44107 | pearld RPC | Full node JSON-RPC |
+| 44108 | pearld P2P | Network peers |
+| 44207 | oyster RPC | Wallet daemon |
+| 8000 | vllm serve | LLM inference API |
+| 8337 | pearl-gateway | Mining RPC (TCP fallback) |
+| 8339 | pearl-gateway | Secondary port |
+| 9109 | pearl-gateway | Prometheus metrics |
+| `/tmp/pearlgw.sock` | pearl-gateway | Unix Domain Socket (default) |
 
 ---
 
 ## Troubleshooting
 
-### Issue: CUDA Kernel Build Failure
-
+### CUDA kernel build fails
 ```bash
-# Force rebuild
 export PEARL_GEMM_FORCE_BUILD=TRUE
-uv sync
+uv sync --package vllm-miner
+# Make sure nvcc --version shows 13.x
 ```
 
-### Issue: Node Connection Failure
-
+### pearl-gateway socket never appears
 ```bash
-# Verify pearld is running
-ps aux | grep pearld
+# Check if gateway is running:
+ps aux | grep pearl-gateway
 
-# Check RPC configuration
-cat ~/.pearld/pearld.conf
+# Run with debug logging:
+pearl-gateway start --debug
+
+# Use a custom socket path if needed:
+export MINER_RPC_SOCKET_PATH=/tmp/pearlgw.sock
+pearl-gateway start
 ```
 
-### Issue: GPU Not Detected
-
+### GPU not detected
 ```bash
-# Verify driver installation
-nvidia-smi
+nvidia-smi                                                      # must work
+nvcc --version                                                  # must show 13.x
+python -c "import torch; print(torch.cuda.is_available())"     # must print True
+```
 
-# Check CUDA version
-nvcc --version
+### pearld not connecting
+```bash
+# Check pearld is running:
+prlctl getinfo
+
+# Check config file:
+cat ~/.pearld/pearld.conf          # Linux
+# %LOCALAPPDATA%\Pearld\pearld.conf  # Windows
+```
+
+### "pearl mining plugin not registered" in vllm logs
+```bash
+# Verify the package is installed:
+uv run python -c "import vllm_miner; print('OK')"
+
+# Re-install if needed:
+uv sync --package vllm-miner
+```
+
+### Wrong PyTorch CUDA version
+```bash
+# Check what version is installed:
+python -c "import torch; print(torch.version.cuda)"
+# Must print: 13.0 (not 12.x or 11.x)
+
+# Fix: do NOT use pip. Use uv from the repo root:
+uv sync --package vllm-miner
 ```
 
 ---
 
-## Project Structure
+## Repository Structure
 
 ```
-pearl-cion/
-├── node/                    # Full node implementation (pearld)
-├── wallet/                  # Oyster HD wallet daemon
-├── zk-pow/                  # ZK proof-of-work circuits (Rust)
+pearl/
+├── node/              → pearld binary (full node)
+├── wallet/
+│   └── cmd/
+│       ├── prlctl/    → prlctl binary (node CLI)
+│       └── oystercli/ → oystercli binary (interactive wallet)
+├── zk-pow/            → ZK proof-of-work circuits (Rust)
 ├── miner/
-│   ├── pearl-gemm/         # CUDA kernels for mining
-│   ├── pearl-gateway/      # Bridge between node and miner
-│   ├── vllm-miner/         # vLLM plugin for mining
-│   └── miner-base/         # Core mining logic
-├── py-pearl-mining/        # Python bindings for mining
-├── plonky2/                # ZK proof system
-└── apps/                   # Frontend applications
+│   ├── pearl-gemm/    → CUDA kernels: NoisyGEMM, BLAKE3 PoW, Tensor Core path
+│   ├── pearl-gateway/ → node ↔ miner bridge  (CLI: pearl-gateway start)
+│   ├── vllm-miner/    → vLLM plugin           (loaded via: vllm serve)
+│   │   └── entrypoint.sh  → production startup sequence (Docker)
+│   ├── miner-base/    → core mining loop, block submission
+│   └── miner-utils/   → shared logging/utilities
+├── py-pearl-mining/   → Python bindings (Rust/PyO3)
+├── pyproject.toml     → uv workspace root (torch cu130 index here)
+└── Taskfile.yml       → task shortcuts (build, test, fmt, lint)
 ```
 
 ---
 
-## Support
+## Useful Links
 
-- **Repository**: https://github.com/shireff/pearl-cion
-- **Issues**: https://github.com/shireff/pearl-cion/issues
+- [Pearl Protocol Paper](https://arxiv.org/abs/2504.09971)
+- [GitHub Repository](https://github.com/pearl-research-labs/pearl)
+- [HuggingFace Model](https://huggingface.co/pearl-ai/Llama-3.3-70B-Instruct-pearl)
+- [CUDA 13.0 Download](https://developer.nvidia.com/cuda-13-0-download-archive)
+- [uv Documentation](https://docs.astral.sh/uv/)
+- [Task Runner](https://taskfile.dev)
