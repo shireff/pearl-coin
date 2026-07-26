@@ -51,11 +51,16 @@ void launch_gpu_mining(
     const size_t shared_mem_bytes =
         (tile_size + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * sizeof(int32_t);
 
+    // Non-invasive runtime logging: print the final runtime values and decision
+    printf("[pearl_gemm] launch_gpu_mining: num_candidates=%u P=%u Q=%u tile_h=%u tile_w=%u m=%u n=%u k=%u rank=%u shared_mem_bytes=%zu\n",
+           num_candidates, P, Q, tile_h, tile_w, m, n, k, rank, shared_mem_bytes);
+
     // FIX #12/#13/#17/#18: prefer WMMA fused kernel when tile fits 16×16;
     // it uses Tensor Cores, async-copy smem loads, and fuses hash into the
     // same kernel, eliminating the separate gpu_jackpot_hash_kernel launch.
     // FIX #3/#11/#19: 256 threads saturates Blackwell SM warp slots.
     if (tile_h == 16 && tile_w == 16) {
+        printf("[pearl_gemm] launch decision: FUSED WMMA path selected (launch_gpu_mining_wmma)\n");
         launch_gpu_mining_wmma(
             reinterpret_cast<const int8_t*>(a_noised),
             reinterpret_cast<const int8_t*>(b_noised_t),
@@ -64,8 +69,8 @@ void launch_gpu_mining(
             num_candidates, P, Q, m, n, k, rank, stream);
         return;
     }
-
     // Scalar fallback for non-16×16 tiles.
+    printf("[pearl_gemm] launch decision: SCALAR fallback selected (gpu_mining_kernel) - tile mismatch or unsupported fused specialization\n");
     constexpr int BLOCK = 256;
     dim3 block(BLOCK);
     dim3 grid(num_candidates);
@@ -89,7 +94,9 @@ void launch_gpu_jackpot_hash(
     const uint32_t total = num_candidates * num_combos;
     const int threads = 256;
     const int blocks = (total + threads - 1) / threads;
-
+    // Log the hash kernel launch parameters
+    printf("[pearl_gemm] launch_gpu_jackpot_hash: total_hashes=%u num_combos=%u threads=%d blocks=%d\n",
+           total, num_combos, threads, blocks);
     gpu_jackpot_hash_kernel<<<blocks, threads, 0, stream>>>(
         jackpots, keys, hashes, num_candidates, num_combos
     );

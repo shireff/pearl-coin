@@ -1325,6 +1325,13 @@ at::Tensor gpu_mine_batch(
       static_cast<uint32_t>(rank),
       stream);
 
+  // Non-invasive runtime logging: record final runtime args passed to launch
+  std::cerr << "[pearl_gemm] gpu_mine_batch: batch_size=" << num_jobs
+            << " P=" << P << " Q=" << Q
+            << " tile_h=" << tile_h << " tile_w=" << tile_w
+            << " m=" << m << " n=" << n << " k=" << k
+            << " rank=" << rank << std::endl;
+
   cudaStreamSynchronize(stream);
 
   return jackpots;
@@ -1358,6 +1365,9 @@ at::Tensor gpu_jackpot_hash(
       static_cast<uint32_t>(num_jobs),
       static_cast<uint32_t>(num_combos),
       stream);
+
+  std::cerr << "[pearl_gemm] gpu_jackpot_hash wrapper: num_jobs=" << num_jobs
+            << " num_combos=" << num_combos << std::endl;
 
   cudaStreamSynchronize(stream);
   return hashes;
