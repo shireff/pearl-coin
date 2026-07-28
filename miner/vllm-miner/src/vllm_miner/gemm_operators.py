@@ -1,3 +1,4 @@
+import time
 import torch
 from miner_base.commitment_hash import CommitmentHasher
 from miner_base.gpu_matmul_config import GPUMatmulConfigFactory
@@ -27,6 +28,75 @@ _LOGGER = get_logger("vllm.pearl_miner")
 _PERSISTENT_BUFFERS: dict[tuple, torch.Tensor] = {}
 
 _HOST_SIGNAL_SYNC_SIZE = get_host_signal_sync_size()
+
+_kernel_timings: dict[str, list[float]] = {}
+_kernel_call_counts: dict[str, int] = {}
+_profiling_enabled = True
+_profiling_sample_count = 0
+_profiling_max_samples = 100
+
+
+def _profile_kernel(name: str, fn, *args, **kwargs):
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    result = fn(*args, **kwargs)
+    end.record()
+    torch.cuda.synchronize()
+    elapsed_ms = start.elapsed_time(end)
+    if _profiling_enabled:
+        _kernel_timings.setdefault(name, []).append(elapsed_ms)
+        _kernel_call_counts[name] = _kernel_call_counts.get(name, 0) + 1
+    return result
+
+
+def _print_profiling_report():
+    global _profiling_enabled
+    _profiling_enabled = False
+    if not _kernel_timings:
+        return
+    _LOGGER.info("=" * 70)
+    _LOGGER.info("PERFORMANCE PROFILE — First %d iterations", _profiling_max_samples)
+    _LOGGER.info("=" * 70)
+    total_time = 0.0
+    for name in sorted(_kernel_timings.keys()):
+        times = _kernel_timings[name]
+        avg_ms = sum(times) / len(times)
+        min_ms = min(times)
+        max_ms = max(times)
+        total_time += avg_ms
+        _LOGGER.info(
+            "  %-25s  avg=%6.2f ms  min=%6.2f ms  max=%6.2f ms  calls=%d",
+            name, avg_ms, min_ms, max_ms, len(times),
+        )
+    _LOGGER.info("-" * 70)
+    _LOGGER.info("  %-25s  avg=%6.2f ms", "TOTAL", total_time)
+    _LOGGER.info("-" * 70)
+    bottleneck = max(_kernel_timings, key=lambda k: sum(_kernel_timings[k]) / len(_kernel_timings[k]))
+    _LOGGER.info("  BOTTLENECK: %s", bottleneck)
+    _LOGGER.info("=" * 70)
+    _LOGGER.info("")
+    _LOGGER.info("DIAGNOSIS GUIDE:")
+    _LOGGER.info("  If noisy_gemm is bottleneck  → compute-bound: tune tile_size_m/n/k")
+    _LOGGER.info("  If tensor_hash is bottleneck  → hash-bound: increase idxs_per_col")
+    _LOGGER.info("  If noise_gen is bottleneck    → noise-bound: reduce noise_rank")
+    _LOGGER.info("  If CPU time dominates          → CPU-GPU sync: check .cpu() calls")
+    _LOGGER.info("  If GPU idle between kernels    → occupancy: increase tile sizes")
+    _LOGGER.info("  If memory bandwidth low        → memory-bound: optimize cols_pattern")
+    _LOGGER.info("")
+
+
+def _print_gpu_snapshot():
+    if not torch.cuda.is_available():
+        return
+    device = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device)
+    mem = torch.cuda.memory_stats(device)
+    _LOGGER.info("GPU Snapshot: %s (%d MB)", props.name, props.total_mem // (1024 * 1024))
+    _LOGGER.info("  SMs: %d  |  Cores: %d  |  Clock: %d MHz", props.multi_processor_count, props.total_cores, props.clock_rate // 1000)
+    _LOGGER.info("  Allocated: %.1f MB  |  Reserved: %.1f MB", mem["allocated_bytes.all.current"] / (1024 * 1024), mem["reserved_bytes.all.current"] / (1024 * 1024))
+    _LOGGER.info("  Active Allocations: %d  |  Active Reservations: %d", mem["active_allocations.current"], mem["active_reservations.current"])
+    _LOGGER.info("")
 
 
 def _get_persistent_buffer(
@@ -310,6 +380,13 @@ def pearl_gemm_noisy(
         skip_reduction=False,
         skip_denoising=False,
     )
+
+    if _profiling_enabled:
+        _profiling_sample_count += 1
+        if _profiling_sample_count == 1:
+            _print_gpu_snapshot()
+        if _profiling_sample_count >= _profiling_max_samples:
+            _print_profiling_report()
 
     if submit_block:
         cuda_event = torch.cuda.Event()

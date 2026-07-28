@@ -29,6 +29,30 @@ from .quantization_operators import NO_HADAMARD_BLOCK_SIZE, quant_7bit, quant_8b
 
 _LOGGER = get_logger("vllm.pearl_miner")
 
+_startup_printed = False
+
+
+def _print_startup_banner():
+    global _startup_printed
+    if _startup_printed:
+        return
+    _startup_printed = True
+    _LOGGER.info("=" * 60)
+    _LOGGER.info("PEARL MINER — Production Profile")
+    _LOGGER.info("=" * 60)
+    _LOGGER.info("  tile_size_m  = %d", config.settings.tile_size_m)
+    _LOGGER.info("  tile_size_n  = %d", config.settings.tile_size_n)
+    _LOGGER.info("  tile_size_k  = %d", config.settings.tile_size_k)
+    _LOGGER.info("  noise_rank   = %d", config.settings.noise_rank)
+    _LOGGER.info("  idxs_per_col = %d", config.settings.idxs_per_col)
+    _LOGGER.info("  cols_pattern = %d entries", len(config.settings.cols_pattern))
+    _LOGGER.info("  pinned_pool  = %d", config.settings.pinned_pool_size)
+    _LOGGER.info("  refresh_rate = %.1f s", config.settings.refresh_interval_seconds)
+    _LOGGER.info("  gpu          = %s", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A")
+    _LOGGER.info("  cuda         = %s", torch.version.cuda or "N/A")
+    _LOGGER.info("=" * 60)
+    _LOGGER.info("")
+
 
 class PearlKernel(Int8ScaledMMLinearKernel):
     """
@@ -199,6 +223,7 @@ class PearlKernel(Int8ScaledMMLinearKernel):
 
         Uses noisy GEMM for large matrices (proof-of-work), vanilla GEMM for small ones.
         """
+        _print_startup_banner()
         if hasattr(config, "use_optimized_quant") and config.use_optimized_quant:
             x_q, x_s, _ = quant_7bit_optimized(x, smooth_scale=smooth_scale, block_size=hadamard_block_size)
         else:

@@ -478,6 +478,188 @@ INFO: noisy_gemm activated for layer ...    ← GPU mining active
 
 ---
 
+## Profiling (Production Path)
+
+### 1. Nsight Systems — System-Level Timeline
+
+Identifies where time is spent across CPU, GPU, memory, and CUDA APIs.
+
+```bash
+# Profile the vLLM process for 30 seconds
+nsys profile \
+  --trace=cuda,nvtx,osrt,cudnn,cublas \
+  --capture-range=cudaProfilerApi \
+  --capture-range-end=stop \
+  --output=profile_report \
+  --force-overwrite true \
+  uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+    --host 0.0.0.0 --port 8000 --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 --enforce-eager
+```
+
+After the process runs for 30 seconds, press `Ctrl+C` to stop and generate the report.
+
+Open the report:
+```bash
+nsys-ui profile_report.qdrep
+```
+
+**What to look for:**
+- Long gaps between GPU kernels → CPU-GPU sync bottleneck
+- CPU time dominating → Python overhead or rate limiting
+- Memory copies between CPU and GPU → unnecessary `.cpu()` calls
+- CUDA API wait time → synchronization overhead
+
+---
+
+### 2. Nsight Compute — CUDA Kernel Analysis
+
+Analyzes individual CUDA kernel performance (occupancy, memory throughput, register pressure).
+
+```bash
+# Profile a specific kernel (run vllm in another terminal first)
+ncu --set full \
+  --kernel-name "noisy_gemm" \
+  --target-processes all \
+  --output ncu_report \
+  --force-overwrite true \
+  uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+    --host 0.0.0.0 --port 8000 --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 --enforce-eager
+```
+
+Stop after 30 seconds with `Ctrl+C`.
+
+Open the report:
+```bash
+ncu-ui ncu_report.ncu-rep
+```
+
+**Key metrics to check:**
+
+| Metric | What it tells you | Good value |
+|--------|-------------------|------------|
+| `sm_efficiency` | GPU SM utilization | > 60% |
+| `achieved_occupancy` | Warp occupancy on SMs | > 50% |
+| `dram_throughput` | Memory bandwidth usage | > 50% of peak |
+| `l1tex_cache_hit_rate` | L1/L2 cache efficiency | > 80% |
+| `smsp__warps_active.avg.pct_of_peak_sustained` | Active warps | > 70% |
+| `gpu__time_duration` | Kernel execution time | Lower is better |
+| `register_per_thread` | Registers per thread | < 255 (limit) |
+| `shared_mem_usage` | Shared memory usage | < 64 KB (limit) |
+
+**If occupancy is low:**
+- Increase `tile_size_m` or `tile_size_n` in `settings.py`
+- Decrease `noise_rank` to reduce register pressure
+- Check if `pipeline_stages` is too high or too low
+
+**If memory is the bottleneck:**
+- Check `dram_throughput` vs GPU memory bandwidth
+- Optimize `cols_pattern` density (more columns = more compute per memory access)
+- Increase `tile_size_k` to process more data per memory load
+
+**If register pressure is high:**
+- `register_per_thread` near 255
+- Reduce `noise_rank` or `tile_size_m`
+- The compiler may be spilling registers to local memory
+
+---
+
+### 3. nvidia-smi dmon — Real-Time GPU Monitoring
+
+Monitors GPU utilization, memory, power, and temperature in real time.
+
+```bash
+# Monitor all GPUs every 1 second
+nvidia-smi dmon -s uctpmv -d 1
+
+# Columns:
+# u = GPU utilization (%)
+# c = CUDA cores utilization (%)
+# t = Temperature (°C)
+# p = Power draw (W)
+# m = Memory utilization (%)
+# v = Memory bandwidth (GB/s)
+```
+
+**What to look for:**
+- GPU utilization < 80% → GPU is waiting for CPU or kernel is too small
+- Memory utilization near 100% → OOM risk or memory-bound kernel
+- Power draw stable at max → GPU is fully utilized
+- Temperature throttling → reduce power limit or improve cooling
+
+**Quick check during mining:**
+```bash
+watch -n 1 nvidia-smi
+```
+
+---
+
+### 4. CUDA Events — Kernel Timing
+
+Measure exact execution time of individual CUDA kernels.
+
+Add this to `gemm_operators.py` for ad-hoc profiling:
+
+```python
+def profile_kernel(name: str, fn, *args, **kwargs):
+    """Profile a single CUDA kernel execution."""
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    result = fn(*args, **kwargs)
+    end.record()
+    torch.cuda.synchronize()
+    elapsed_ms = start.elapsed_time(end)
+    _LOGGER.info(f"[PROFILE] {name}: {elapsed_ms:.2f} ms")
+    return result
+```
+
+Usage in `pearl_gemm_noisy`:
+```python
+# Profile each kernel individually
+profile_kernel("tensor_hash_A", run_tensor_hash, A.to(torch.uint8), key_tensor, A_tensor_hash, scratchpad)
+profile_kernel("tensor_hash_B", run_tensor_hash, B.to(torch.uint8), key_tensor, B_tensor_hash, scratchpad)
+profile_kernel("commitment_hash", commitment_hash_from_merkle_roots, A_tensor_hash, B_tensor_hash, key_tensor, commitment_hash_A, commitment_hash_B)
+profile_kernel("noise_gen", noise_gen, R=r, EAL=EAL, EAL_fp16=EAL_fp16, ...)
+profile_kernel("noisy_gemm", noisy_gemm, A=A, B=B, ...)
+```
+
+**What to look for:**
+- Which kernel takes the most time → that's your bottleneck
+- If `noisy_gemm` dominates → kernel is compute-bound, optimize tile sizes
+- If `tensor_hash` dominates → hash computation is the bottleneck, increase `idxs_per_col`
+- If `noise_gen` dominates → noise generation is the bottleneck, optimize `noise_rank`
+
+---
+
+### 5. Combined Profiling Workflow
+
+```bash
+# Step 1: Check GPU utilization
+watch -n 1 nvidia-smi
+
+# Step 2: Run Nsight Systems for system-level timeline
+nsys profile --trace=cuda,nvtx,osrt,cudnn,cublas \
+  --output profile_report --force-overwrite true \
+  uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+    --host 0.0.0.0 --port 8000 --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 --enforce-eager
+
+# Step 3: Run Nsight Compute for kernel-level analysis
+ncu --set full --kernel-name "noisy_gemm" \
+  --output ncu_report --force-overwrite true \
+  uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+    --host 0.0.0.0 --port 8000 --max-model-len 8192 \
+    --gpu-memory-utilization 0.9 --enforce-eager
+
+# Step 4: Analyze results
+nsys-ui profile_report.qdrep
+ncu-ui ncu_report.ncu-rep
+```
+
+---
+
 ## Performance Settings
 
 ### Single GPU
