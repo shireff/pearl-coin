@@ -83,19 +83,19 @@ CGO_ENABLED=0 go build -o bin/oystercli ./wallet/cmd/oystercli
 
 **Terminal 1 — Start the full node:**
 ```bash
-cd "D:\Front-End Projects\mining\pearl"
+cd "pearl-cion"
 ./bin/pearld --rpcuser=rpcuser --rpcpass=rpcpass --rpclisten=0.0.0.0:44107 --miningaddr=<your-mining-address> --txindex
 ```
 
 **Terminal 2 — Start the gateway:**
 ```bash
-cd "D:\Front-End Projects\mining\pearl"
+cd "pearl-cion"
 pearl-gateway start
 ```
 
 **Terminal 3 — Start the miner (vLLM with Pearl plugin):**
 ```bash
-cd "D:\Front-End Projects\mining\pearl"
+cd "pearl-cion"
 uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
   --host 0.0.0.0 \
   --port 8000 \
