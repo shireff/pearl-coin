@@ -60,6 +60,72 @@ The CPU only:
 
 ---
 
+## Quick Reference — Client-Facing Commands
+
+### Build (from repository root)
+
+```bash
+# Option 1: Using uv (works without task)
+uv sync --package vllm-miner
+
+# Option 2: Build everything (all workspace packages)
+uv sync --all-packages
+
+# Option 3: Build blockchain binaries only (Go + Rust)
+cd zk-pow && cargo run --release --no-default-features --bin build_cache src/circuit/v2_cache.bin src/v1/v1_cache.bin && cd ..
+go build -tags xmss,zkpow -o bin/pearld ./node
+go build -tags xmss,zkpow -o bin/prlctl ./node/cmd/prlctl
+go build -tags xmss,zkpow -o bin/oyster ./wallet
+CGO_ENABLED=0 go build -o bin/oystercli ./wallet/cmd/oystercli
+```
+
+### Run the full mining stack
+
+**Terminal 1 — Start the full node:**
+```bash
+cd "D:\Front-End Projects\mining\pearl"
+./bin/pearld --rpcuser=rpcuser --rpcpass=rpcpass --rpclisten=0.0.0.0:44107 --miningaddr=<your-mining-address> --txindex
+```
+
+**Terminal 2 — Start the gateway:**
+```bash
+cd "D:\Front-End Projects\mining\pearl"
+pearl-gateway start
+```
+
+**Terminal 3 — Start the miner (vLLM with Pearl plugin):**
+```bash
+cd "D:\Front-End Projects\mining\pearl"
+uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9 \
+  --enforce-eager
+```
+
+> The Pearl mining plugin is auto-loaded as a vLLM general plugin.
+> You will see `INFO: pearl mining plugin registered` in the vLLM logs.
+
+### Verify mining is active
+
+```bash
+# Check GPU utilization
+nvidia-smi
+
+# Check gateway metrics
+curl http://127.0.0.1:9109/metrics
+
+# Check node connectivity
+prlctl getinfo
+
+# Check vllm logs for:
+#   INFO: pearl mining plugin registered
+#   INFO: noisy_gemm activated for layer ...
+```
+
+---
+
 ## Method 1: From Source (Git)
 
 ### Step 1 — Clone the repository
@@ -146,7 +212,7 @@ task build:blockchain
 
 This produces `bin/pearld`, `bin/prlctl`, `bin/oyster`, `bin/oystercli`.
 
-Or manually without Task:
+**If `task` is not installed**, build manually without Task:
 
 ```bash
 # Build ZK cache first (one-time, takes ~10 minutes)
@@ -183,6 +249,11 @@ If the CUDA kernel build fails:
 ```bash
 export PEARL_GEMM_FORCE_BUILD=TRUE
 uv sync --package vllm-miner
+```
+
+**Alternative: build everything (all workspace packages):**
+```bash
+uv sync --all-packages
 ```
 
 ### Step 9 — Create a wallet and get a mining address

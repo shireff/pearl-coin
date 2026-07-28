@@ -220,18 +220,18 @@ class AsyncLoopManager:
                 self._mining_job = new_mining_job
             except Exception:
                 _LOGGER.exception("Failed to get mining info")
-            await asyncio.sleep(1.0)  # Update every second
+            await asyncio.sleep(0.5)  # Update every 0.5s
 
     async def _process_cuda_events_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                item = await asyncio.wait_for(self._cuda_event_queue.get(), timeout=10)
+                item = await asyncio.wait_for(self._cuda_event_queue.get(), timeout=5)
             except TimeoutError:
                 # check the stop event
                 continue
 
             while not item.cuda_event.query():
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
 
             # callback should be fast (setup and call `handle_submit_block`)
             try:

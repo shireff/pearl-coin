@@ -1,14 +1,6 @@
 localhost:44107 {
 	tls internal
 
-	rate_limit {
-		zone rpc {
-			key    {remote_host}
-			events 100
-			window 1m
-		}
-	}
-
 	jsonrpc_cache {
 		cache getblocktemplate 1s
 	}

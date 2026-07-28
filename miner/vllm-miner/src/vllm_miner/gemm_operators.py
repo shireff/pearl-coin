@@ -24,6 +24,33 @@ from .mining_state import (
 
 _LOGGER = get_logger("vllm.pearl_miner")
 
+_PERSISTENT_BUFFERS: dict[tuple, torch.Tensor] = {}
+
+_HOST_SIGNAL_SYNC_SIZE = get_host_signal_sync_size()
+
+
+def _get_persistent_buffer(
+    name: str, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    key = (name, shape, dtype, device.index)
+    buf = _PERSISTENT_BUFFERS.get(key)
+    if buf is None or buf.shape != shape or buf.dtype != dtype or buf.device != device:
+        buf = torch.empty(shape, dtype=dtype, device=device)
+        _PERSISTENT_BUFFERS[key] = buf
+    return buf
+
+
+def _clear_persistent_buffers() -> None:
+    _PERSISTENT_BUFFERS.clear()
+
+
+def _acquire_pinned_buffer() -> torch.Tensor:
+    return get_pinned_pool().acquire()
+
+
+def _release_pinned_buffer(buffer: torch.Tensor) -> None:
+    get_pinned_pool().release(buffer)
+
 
 def pearl_gemm_vanilla(
     A: torch.Tensor,
@@ -65,6 +92,83 @@ def pearl_gemm_vanilla(
     return C
 
 
+def _run_tensor_hash_on_stream(
+    tensor: torch.Tensor,
+    key_tensor: torch.Tensor,
+    output_hash: torch.Tensor,
+    scratchpad: torch.Tensor,
+    stream: torch.cuda.Stream,
+) -> None:
+    with torch.cuda.stream(stream):
+        run_tensor_hash(
+            tensor.to(torch.uint8),
+            key_tensor,
+            output_hash,
+            scratchpad,
+        )
+
+
+def _generate_noise_factors_streamed(
+    m: int,
+    n: int,
+    k: int,
+    r: int,
+    commitment_hash_A: torch.Tensor,
+    commitment_hash_B: torch.Tensor,
+    device: torch.device,
+    stream: torch.cuda.Stream,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """
+    Generates cryptographic noise factors on a dedicated CUDA stream.
+
+    Runs noise_gen asynchronously on the provided stream so it overlaps
+    with other GPU work, improving GPU utilization.
+    """
+    EAL = _get_persistent_buffer("EAL", (m, r), torch.int8, device)
+    EBR = _get_persistent_buffer("EBR", (n, r), torch.int8, device)
+    EAR_R_major = _get_persistent_buffer("EAR_R_major", (k, r), torch.int8, device)
+    EBL_R_major = _get_persistent_buffer("EBL_R_major", (k, r), torch.int8, device)
+    EAR_K_major = _get_persistent_buffer("EAR_K_major", (r, k), torch.int8, device)
+    EBL_K_major = _get_persistent_buffer("EBL_K_major", (r, k), torch.int8, device)
+    EAL_fp16 = _get_persistent_buffer("EAL_fp16", (m, r), torch.float16, device)
+    EBR_fp16 = _get_persistent_buffer("EBR_fp16", (n, r), torch.float16, device)
+
+    with torch.cuda.stream(stream):
+        noise_gen(
+            R=r,
+            EAL=EAL,
+            EAL_fp16=EAL_fp16,
+            EAR_R_major=EAR_R_major,
+            EAR_K_major=EAR_K_major,
+            EBL_R_major=EBL_R_major,
+            EBL_K_major=EBL_K_major,
+            EBR=EBR,
+            EBR_fp16=EBR_fp16,
+            key_A=commitment_hash_A,
+            key_B=commitment_hash_B,
+        )
+
+    return (
+        EAL,
+        EAR_R_major,
+        EBL_R_major,
+        EAR_K_major,
+        EBL_K_major,
+        EBR,
+        EAL_fp16,
+        EBR_fp16,
+    )
+
+
 def pearl_gemm_noisy(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -95,171 +199,135 @@ def pearl_gemm_noisy(
     n = b.shape[0]
     k = a.shape[1]
     r = config.settings.noise_rank
+    device = a.device
+
     A = a
     B = b
     A_scales = scale_a
     B_scales = scale_b
-    C = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    matrix_bytes = max(m * k, n * k)
-    tensor_hash_scratchpad = torch.empty(
-        get_required_scratchpad_bytes(matrix_bytes),
-        dtype=torch.uint8,
-        device=a.device,
+    C = _get_persistent_buffer("C", (m, n), out_dtype, device)
+    scratchpad = _get_persistent_buffer(
+        "scratchpad",
+        (get_required_scratchpad_bytes(max(m * k, n * k)),),
+        torch.uint8,
+        device,
     )
+    key_tensor = _get_persistent_buffer("key_tensor", (32,), torch.uint8, device)
+    A_tensor_hash = _get_persistent_buffer("A_tensor_hash", (32,), torch.uint8, device)
+    B_tensor_hash = _get_persistent_buffer("B_tensor_hash", (32,), torch.uint8, device)
+    commitment_hash_A = _get_persistent_buffer("commitment_hash_A", (32,), torch.uint8, device)
+    commitment_hash_B = _get_persistent_buffer("commitment_hash_B", (32,), torch.uint8, device)
+    pow_target_tensor = _get_persistent_buffer("pow_target", (8,), torch.uint32, device)
+    host_signal_sync = _get_persistent_buffer(
+        "host_signal_sync", (_HOST_SIGNAL_SYNC_SIZE,), torch.int8, device
+    )
+
+    EAL = _get_persistent_buffer("EAL", (m, r), torch.int8, device)
+    EBR = _get_persistent_buffer("EBR", (n, r), torch.int8, device)
+    EAR_R_major = _get_persistent_buffer("EAR_R_major", (k, r), torch.int8, device)
+    EBL_R_major = _get_persistent_buffer("EBL_R_major", (k, r), torch.int8, device)
+    EAR_K_major = _get_persistent_buffer("EAR_K_major", (r, k), torch.int8, device)
+    EBL_K_major = _get_persistent_buffer("EBL_K_major", (r, k), torch.int8, device)
+    EAL_fp16 = _get_persistent_buffer("EAL_fp16", (m, r), torch.float16, device)
+    EBR_fp16 = _get_persistent_buffer("EBR_fp16", (n, r), torch.float16, device)
+
+    BpEB = _get_persistent_buffer("BpEB", (n, k), torch.int8, device)
+    EARxBpEB = _get_persistent_buffer("EARxBpEB", (n, r), torch.float16, device)
+    ApEA = _get_persistent_buffer("ApEA", (m, k), torch.int8, device)
+    A_E_BL = _get_persistent_buffer("A_E_BL", (m, r), torch.float16, device)
+
     matmul_config = GPUMatmulConfigFactory.create(k=k, noise_rank=r)
 
-    # Get current mining job from shared state
     mining_job = get_async_manager().get_mining_job()
-
-    # Calculate adjusted pow_target
     adjusted_target = mining_job.adjust_target(mining_config=matmul_config.mining_config)
 
     hash_key = CommitmentHasher.get_key(
         mining_job.incomplete_header_bytes, matmul_config.mining_config
     )
 
-    key_tensor = torch.frombuffer(bytearray(hash_key), dtype=torch.uint8).to("cuda")
+    key_tensor.copy_(torch.frombuffer(bytearray(hash_key), dtype=torch.uint8))
 
-    A_tensor_hash = torch.empty(32, device="cuda", dtype=torch.uint8)
-    run_tensor_hash(
-        A.to(torch.uint8),
-        key_tensor,
-        A_tensor_hash,
-        tensor_hash_scratchpad,
-    )
+    stream_a = torch.cuda.Stream(device=device)
+    stream_b = torch.cuda.Stream(device=device)
 
-    B_tensor_hash = torch.empty(32, device="cuda", dtype=torch.uint8)
-    run_tensor_hash(
-        B.to(torch.uint8),
-        key_tensor,
-        B_tensor_hash,
-        tensor_hash_scratchpad,
-    )
+    _run_tensor_hash_on_stream(A.to(torch.uint8), key_tensor, A_tensor_hash, scratchpad, stream_a)
+    _run_tensor_hash_on_stream(B.to(torch.uint8), key_tensor, B_tensor_hash, scratchpad, stream_b)
 
-    # Generate commitment hash for noise generation
-    commitment_hash_A_tensor = torch.empty(32, device="cuda", dtype=torch.uint8)
-    commitment_hash_B_tensor = torch.empty(32, device="cuda", dtype=torch.uint8)
+    torch.cuda.current_stream().wait_stream(stream_a)
+    torch.cuda.current_stream().wait_stream(stream_b)
+
     commitment_hash_from_merkle_roots(
-        A_tensor_hash,
-        B_tensor_hash,
-        key_tensor,
-        commitment_hash_A_tensor,
-        commitment_hash_B_tensor,
+        A_tensor_hash, B_tensor_hash, key_tensor,
+        commitment_hash_A, commitment_hash_B,
     )
 
-    # Generate noise factors from commitment hashes
+    noise_stream = torch.cuda.Stream(device=device)
+    noise_factors = _generate_noise_factors_streamed(
+        m, n, k, r, commitment_hash_A, commitment_hash_B, device, noise_stream
+    )
+
+    torch.cuda.current_stream().wait_stream(noise_stream)
+
     (
-        EAL,
-        EAR_R_major,
-        EBL_R_major,
-        EAR_K_major,
-        EBL_K_major,
-        EBR,
-        EAL_fp16,
-        EBR_fp16,
-    ) = generate_noise_factors(
-        m,
-        n,
-        k,
-        r,
-        commitment_hash_A_tensor,
-        commitment_hash_B_tensor,
-        a.device,
-    )
+        EAL, EAR_R_major, EBL_R_major, EAR_K_major, EBL_K_major, EBR, EAL_fp16, EBR_fp16
+    ) = noise_factors
 
-    # Always compute B noising (depends on A through EAR)
-    BpEB = torch.empty((n, k), dtype=torch.int8, device=a.device)
-    EARxBpEB = torch.empty((n, r), dtype=torch.float16, device=a.device)
+    pow_target_tensor.copy_(make_pow_target_tensor(adjusted_target))
 
-    # Allocate A noising tensors (input-dependent)
-    ApEA = torch.empty((m, k), dtype=torch.int8, device=a.device)
-    A_E_BL = torch.empty((m, r), dtype=torch.float16, device=a.device)
+    host_signal_header_pinned = _acquire_pinned_buffer()
 
-    host_signal_sync_size = get_host_signal_sync_size()
-    host_signal_sync = torch.zeros((host_signal_sync_size,), dtype=torch.int8, device="cuda")
-    host_signal_header_pinned = get_pinned_pool().acquire()
-
-    # Create pow_target tensor from adjusted_target
-    pow_target_tensor = make_pow_target_tensor(adjusted_target)
-
-    # Run noisy GEMM with default kernel configurations
     noisy_gemm(
-        A=A,  # Input matrix A (m x k)
-        B=B,  # Input matrix B (n x k)
-        EAL=EAL,  # Noise factor E_AL (m x r)
-        EAL_fp16=EAL_fp16,  # fp16 version
-        EBR=EBR,  # Noise factor E_BR (n x r)
-        EBR_fp16=EBR_fp16,  # fp16 version
+        A=A,
+        B=B,
+        EAL=EAL,
+        EAL_fp16=EAL_fp16,
+        EBR=EBR,
+        EBR_fp16=EBR_fp16,
         EAR_R_major=EAR_R_major,
         EBL_R_major=EBL_R_major,
         EAR_K_major=EAR_K_major,
         EBL_K_major=EBL_K_major,
-        AxEBL_fp16=A_E_BL,  # Intermediate tensor A * E_BL (m x r)
-        EARxBpEB_fp16=EARxBpEB,  # Output tensor for EAR * BpEB (n x r)
-        ApEA=ApEA,  # Output tensor for A + EA (m x k)
-        BpEB=BpEB,  # Output tensor for B + EB (n x k)
-        A_scales=A_scales,  # Scale factors for A
-        B_scales=B_scales,  # Scale factors for B
-        C=C,  # Output matrix C (m x n)
+        AxEBL_fp16=A_E_BL,
+        EARxBpEB_fp16=EARxBpEB,
+        ApEA=ApEA,
+        BpEB=BpEB,
+        A_scales=A_scales,
+        B_scales=B_scales,
+        C=C,
         host_signal_header_pinned=host_signal_header_pinned,
         host_signal_sync=host_signal_sync,
         pow_target=pow_target_tensor,
-        pow_key=commitment_hash_A_tensor.view(torch.uint32),
+        pow_key=commitment_hash_A.view(torch.uint32),
         tile_size_m=config.settings.tile_size_m,
         tile_size_n=config.settings.tile_size_n,
         tile_size_k=config.settings.tile_size_k,
-        run_noising_A=True,  # run_noising_A
-        run_noising_B=True,  # run_noising_B
-        skip_reduction=False,  # skip_reduction
-        skip_denoising=False,  # skip_denoising
+        pipeline_stages=4,
+        cluster_size_m=2,
+        cluster_size_n=2,
+        run_noising_A=True,
+        run_noising_B=True,
+        skip_reduction=False,
+        skip_denoising=False,
     )
 
     if submit_block:
-        # Record a CUDA event after the kernel launch - will complete when kernel finishes
         cuda_event = torch.cuda.Event()
         cuda_event.record()
 
-        # Create callback for processing the status check
         callback = StatusCheckCallback(
             host_signal_header_pinned=host_signal_header_pinned,
-            commitment_hash_A_tensor=commitment_hash_A_tensor,
-            commitment_hash_B_tensor=commitment_hash_B_tensor,
+            commitment_hash_A_tensor=commitment_hash_A,
+            commitment_hash_B_tensor=commitment_hash_B,
             A=A,
             B=B,
             mining_job=mining_job,
         )
 
         get_async_manager().schedule_status_check(cuda_event, callback)
-
-        # Callback owns these tensors
-        host_signal_header_pinned = None
-        commitment_hash_A_tensor = None
-        commitment_hash_B_tensor = None
     else:
-        get_pinned_pool().release(host_signal_header_pinned)
-        del host_signal_header_pinned
-        del commitment_hash_A_tensor
-        del commitment_hash_B_tensor
+        _release_pinned_buffer(host_signal_header_pinned)
 
-    del pow_target_tensor
-    del ApEA
-    del BpEB
-    del A_E_BL
-    del EAL
-    del EBR
-    del EAR_R_major
-    del EBL_R_major
-    del EAR_K_major
-    del EBL_K_major
-    del EAL_fp16
-    del EBR_fp16
-    del key_tensor
-    del A_tensor_hash
-    del B_tensor_hash
-    del tensor_hash_scratchpad
-    del host_signal_sync
-    del EARxBpEB
     return C
 
 
