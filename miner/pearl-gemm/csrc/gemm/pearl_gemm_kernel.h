@@ -78,7 +78,7 @@ using namespace cute;
 template <int kNumWarps>
 CUTE_HOST_DEVICE constexpr int producer_reg_dealloc() {
   if constexpr (kNumWarps == 16) {
-    return 40;   // OPT-I: raised from 32 → 40 for bM=256 configs
+    return 48;   // OPT-I: raised from 32 → 48 for bM=256 configs
   } else {
     return 24;   // unchanged for 8, 12, 20 warp configs
   }

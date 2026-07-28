@@ -174,65 +174,76 @@ struct KernelTraits {
 
   static_assert(R % 16 == 0);  // needed for this MMA op
 
-  // NOTE if you change these, also change the pipeline stages heuristic in
-  // heuristics.hpp!
-  struct SharedStorageDenoise : cute::aligned_struct<128> {
-    // Overlapping to allow larger tile sizes.
-    // Denoise factors are all fp16 and used as inputs to SS WGMMA. Currently
-    //  all denoise factors' smem storage are disjoint with each other while
-    //  overlapped with mainloop smem, so we wait for mainloop gemms to finish
-    //  before starting loads for denoise factors.
-    union {
-      struct {
-        cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutA>,
-                            cutlass::detail::alignment_for_swizzle(
-                                SmemLayoutA{})>
-            smem_A;
-        cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutB>,
-                            cutlass::detail::alignment_for_swizzle(
-                                SmemLayoutB{})>
-            smem_B;
-      };
+// NOTE if you change these, also change the pipeline stages heuristic in
+   // heuristics.hpp!
+   struct SharedStorageDenoise : cute::aligned_struct<128> {
+     // Overlapping to allow larger tile sizes.
+     // Denoise factors are all fp16 and used as inputs to SS WGMMA.
+     // The four denoise tensors are split into two sub-unions, one per
+     // pipeline stage (AxEB and EAxBpEB), so the compiler only allocates
+     // for the larger sub-union rather than all four tensors at once.
+     // The two sub-unions are disjoint in time: EAL/EARxBpEB are loaded
+     // and consumed before AxEBL/EBR are loaded, so they can share the
+     // same SMEM region.
+     union {
+       struct {
+         cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutA>,
+                             cutlass::detail::alignment_for_swizzle(
+                                 SmemLayoutA{})>
+             smem_A;
+         cute::array_aligned<ElementIn, cute::cosize_v<SmemLayoutB>,
+                             cutlass::detail::alignment_for_swizzle(
+                                 SmemLayoutB{})>
+             smem_B;
+       };
 
-      struct {
-        cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutAxEBL>,
-                            cutlass::detail::alignment_for_swizzle(
-                                SmemLayoutAxEBL{})>
-            smem_AxEBL;
-        cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutEBR>,
-                            cutlass::detail::alignment_for_swizzle(
-                                SmemLayoutEBR{})>
-            smem_EBR;
-        cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutEAL>,
-                            cutlass::detail::alignment_for_swizzle(
-                                SmemLayoutEAL{})>
-            smem_EAL;
-        cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutEARxBpEB>,
-                            cutlass::detail::alignment_for_swizzle(
-                                SmemLayoutEARxBpEB{})>
-            smem_EARxBpEB;
-      };
+       // EAxBpEB pipeline stage: EAL and EARxBpEB are loaded together,
+       // consumed together in the EAxBpEB GEMM, then evicted before
+       // the AxEB stage loads begin.
+       struct {
+         cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutEAL>,
+                             cutlass::detail::alignment_for_swizzle(
+                                 SmemLayoutEAL{})>
+             smem_EAL;
+         cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutEARxBpEB>,
+                             cutlass::detail::alignment_for_swizzle(
+                                 SmemLayoutEARxBpEB{})>
+             smem_EARxBpEB;
+       };
 
-      cute::array_aligned<ElementOut, cute::cosize_v<SmemLayoutC>,
-                          cutlass::detail::alignment_for_swizzle(SmemLayoutC{})>
-          smem_C;
-    };
+       // AxEB pipeline stage: AxEBL and EBR are loaded together,
+       // consumed together in the AxEB GEMM.
+       struct {
+         cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutAxEBL>,
+                             cutlass::detail::alignment_for_swizzle(
+                                 SmemLayoutAxEBL{})>
+             smem_AxEBL;
+         cute::array_aligned<ElementDenoise, cute::cosize_v<SmemLayoutEBR>,
+                             cutlass::detail::alignment_for_swizzle(
+                                 SmemLayoutEBR{})>
+             smem_EBR;
+       };
 
-    cute::array_aligned<ElementScale, cute::cosize_v<SmemLayoutScaleA>,
-                        cutlass::detail::alignment_for_swizzle(
-                            SmemLayoutScaleA{})>
-        smem_scale_a;
-    cute::array_aligned<ElementScale, cute::cosize_v<SmemLayoutScaleB>,
-                        cutlass::detail::alignment_for_swizzle(
-                            SmemLayoutScaleB{})>
-        smem_scale_b;
+       cute::array_aligned<ElementOut, cute::cosize_v<SmemLayoutC>,
+                           cutlass::detail::alignment_for_swizzle(SmemLayoutC{})>
+           smem_C;
+     };
 
-    struct {
-      typename MainloopPipeline::SharedStorage pipeline;
-      typename DenoisePipeline::SharedStorage AxEB_pipeline;
-      typename DenoisePipeline::SharedStorage EAxBpEB_pipeline;
-    };
-  };
+     cute::array_aligned<ElementScale, cute::cosize_v<SmemLayoutScaleA>,
+                         cutlass::detail::alignment_for_swizzle(
+                             SmemLayoutScaleA{})>
+         smem_scale_a;
+     cute::array_aligned<ElementScale, cute::cosize_v<SmemLayoutScaleB>,
+                         cutlass::detail::alignment_for_swizzle(
+                             SmemLayoutScaleB{})>
+         smem_scale_b;
+
+     struct {
+       typename MainloopPipeline::SharedStorage pipeline;
+       typename DenoisePipeline::SharedStorage AxEB_pipeline;
+       typename DenoisePipeline::SharedStorage EAxBpEB_pipeline;
+     };
+   };
 
   struct SharedStorageNoDenoise : cute::aligned_struct<128> {
     struct {
