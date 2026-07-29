@@ -139,10 +139,20 @@ build_zk_pow_go_bindings() {
     cargo build --release --no-default-features
 }
 
+build_xmss() {
+    info "Building xmss static library..."
+    cd "$REPO_ROOT/xmss"
+    make
+    if [ ! -f libxmss.a ]; then
+        die "xmss build failed: libxmss.a not found after make"
+    fi
+}
+
 build_go_binaries() {
     info "Building Go binaries..."
     cd "$REPO_ROOT"
     mkdir -p "$BIN_DIR"
+    build_xmss
     go build -tags xmss,zkpow -o "$BIN_DIR/pearld" ./node
     go build -tags xmss,zkpow -o "$BIN_DIR/prlctl" ./node/cmd/prlctl
     if [ -d "$REPO_ROOT/wallet" ]; then
