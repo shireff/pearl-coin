@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "${CUDA_HOME:-}" ]; then
-    for candidate in /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0; do
+    for candidate in /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-13.* /usr/local/cuda-*; do
         if [ -x "$candidate/bin/nvcc" ]; then
             CUDA_HOME="$candidate"
             break
@@ -25,7 +25,8 @@ fi
 
 if [ -z "${CUDA_HOME:-}" ]; then
     echo "ERROR: CUDA_HOME is not set and no supported CUDA toolkit was found."
-    echo "Install CUDA 13.x and export CUDA_HOME=/usr/local/cuda-13.x"
+    echo "Install CUDA 13.x and export CUDA_HOME to your actual CUDA install path."
+    echo "For example: export CUDA_HOME=/usr/local/cuda-13.2"
     exit 1
 fi
 
