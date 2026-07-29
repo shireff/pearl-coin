@@ -3,6 +3,18 @@
 #include <cuda_runtime.h>
 #include <cassert>
 
+// Forward declaration — defined in persistent_mining.cu
+__global__ void persistent_mining_kernel(
+    const int32_t* __restrict__ global_a_noised,
+    const int32_t* __restrict__ global_b_noised_t,
+    const int32_t* __restrict__ global_a_rows,
+    const int32_t* __restrict__ global_b_cols,
+    pearl::persistent::PersistentJob* jobs,
+    uint32_t num_jobs,
+    uint32_t max_tile_h,
+    uint32_t max_tile_w
+);
+
 namespace pearl {
 namespace persistent {
 

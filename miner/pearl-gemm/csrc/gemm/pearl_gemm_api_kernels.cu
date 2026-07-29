@@ -11,9 +11,7 @@
 #define CHECK_DEVICE(x)     TORCH_CHECK(x.is_cuda(), #x " must be on CUDA")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 
-namespace {
-
-__global__ void blake3_keyed_hash_kernel(
+static __global__ void blake3_keyed_hash_kernel(
     const uint32_t* messages,
     const uint32_t* key,
     uint32_t*       outputs,
@@ -24,8 +22,6 @@ __global__ void blake3_keyed_hash_kernel(
         blake3::blake3_keyed_hash(messages + idx * 16, key, outputs + idx * 8);
     }
 }
-
-} // anonymous namespace
 
 at::Tensor blake3_keyed_hash(at::Tensor messages, at::Tensor key) {
     CHECK_DEVICE(messages);
