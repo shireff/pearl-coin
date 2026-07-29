@@ -42,9 +42,19 @@ install_system_packages() {
     info "Installing required system packages..."
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update
+
+        local python_distutils_pkg=""
+        if apt-cache show python3-distutils >/dev/null 2>&1; then
+            python_distutils_pkg="python3-distutils"
+        elif apt-cache show python3.12-distutils >/dev/null 2>&1; then
+            python_distutils_pkg="python3.12-distutils"
+        else
+            python_distutils_pkg="python3-setuptools"
+        fi
+
         sudo apt-get install -y \
             git curl build-essential pkg-config libssl-dev clang lld tmux \
-            python3 python3-pip python3-venv python3-dev python3-distutils ninja-build \
+            python3 python3-pip python3-venv python3-dev "$python_distutils_pkg" ninja-build \
             unzip
     else
         die "unsupported package manager: apt-get is required on this system"
