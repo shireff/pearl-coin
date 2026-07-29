@@ -36,16 +36,16 @@ __device__ __forceinline__ int32_t dot_rank_i8_vectorized(const int8_t* a_vec, c
         const uint32_t b1 = *reinterpret_cast<const uint32_t*>(b_vec + l + 4);
         const uint32_t b2 = *reinterpret_cast<const uint32_t*>(b_vec + l + 8);
         const uint32_t b3 = *reinterpret_cast<const uint32_t*>(b_vec + l + 12);
-        acc = __dp4a(a0, b0, acc);
-        acc = __dp4a(a1, b1, acc);
-        acc = __dp4a(a2, b2, acc);
-        acc = __dp4a(a3, b3, acc);
+        acc = __dp4a(static_cast<int32_t>(a0), static_cast<int32_t>(b0), acc);
+        acc = __dp4a(static_cast<int32_t>(a1), static_cast<int32_t>(b1), acc);
+        acc = __dp4a(static_cast<int32_t>(a2), static_cast<int32_t>(b2), acc);
+        acc = __dp4a(static_cast<int32_t>(a3), static_cast<int32_t>(b3), acc);
     }
     #pragma unroll 1
     for (; l + 3 < rank; l += 4) {
         const uint32_t a0 = *reinterpret_cast<const uint32_t*>(a_vec + l);
         const uint32_t b0 = *reinterpret_cast<const uint32_t*>(b_vec + l);
-        acc = __dp4a(a0, b0, acc);
+        acc = __dp4a(static_cast<int32_t>(a0), static_cast<int32_t>(b0), acc);
     }
     for (; l < rank; l++) {
         acc += static_cast<int32_t>(a_vec[l]) * static_cast<int32_t>(b_vec[l]);
