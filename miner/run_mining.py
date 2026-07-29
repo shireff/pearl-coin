@@ -17,6 +17,35 @@ COLS_PATTERN_SIZE = 64
 PINNED_POOL_SIZE = 256
 REFRESH_RATE = 0.5
 
+# pearl-gemm CUDA extension — built in pearl-cion repo, symlinked into .venv
+PEARL_GEMM_SO_SRC = "/root/pearl-cion/miner/pearl-gemm/src"
+
+
+def _install_pearl_gemm():
+    """Copy pearl_gemm_cuda.so into the .venv site-packages so vllm can import it."""
+    import glob
+    import shutil
+
+    venv_sp = f"{CLONE_DIR}/.venv/lib/python3.12/site-packages"
+    pattern = os.path.join(PEARL_GEMM_SO_SRC, "pearl_gemm_cuda*.so")
+    matches = glob.glob(pattern)
+
+    if not matches:
+        print(f"[WARN] pearl_gemm_cuda.so not found at {PEARL_GEMM_SO_SRC}")
+        print("[WARN] Run: cd /root/pearl-cion && bash miner/pearl-gemm/build.sh --no-pull")
+        return
+
+    for src in matches:
+        dst = os.path.join(venv_sp, os.path.basename(src))
+        if os.path.exists(dst):
+            print(f"[OK] pearl_gemm_cuda already in venv: {os.path.basename(src)}")
+            continue
+        try:
+            shutil.copy2(src, dst)
+            print(f"[OK] Installed pearl_gemm_cuda: {os.path.basename(src)}")
+        except Exception as e:
+            print(f"[WARN] Could not install {os.path.basename(src)}: {e}")
+
 
 def _stream_logs(name: str, proc):
     while True:
@@ -74,6 +103,18 @@ def _print_gpu_snapshot():
 
 def run_mining():
     os.chdir(CLONE_DIR)
+    _install_pearl_gemm()
+
+    # HuggingFace token for private model access
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if hf_token:
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        os.environ["HF_TOKEN"] = hf_token
+        print(f"[OK] HuggingFace token set ({len(hf_token)} chars)")
+    else:
+        print("[WARN] No HF_TOKEN set — private model access may fail")
+        print("[WARN] Set: export HF_TOKEN=your_token_here")
+
     os.environ["PEARLD_RPC_URL"] = "http://localhost:44107"
     os.environ["PEARLD_RPC_USER"] = "rpcuser"
     os.environ["PEARLD_RPC_PASSWORD"] = "rpcpass"
@@ -127,13 +168,19 @@ def run_mining():
 
         # Start vllm serve
         print("[3/4] Starting vllm serve with Pearl mining plugin...")
+        vllm_env = os.environ.copy()
+        vllm_env["PYTHONPATH"] = (
+            f"{CLONE_DIR}/.venv/lib/python3.12/site-packages:"
+            + vllm_env.get("PYTHONPATH", "")
+        )
         vllm_proc = subprocess.Popen(
             [f"{CLONE_DIR}/.venv/bin/vllm", "serve", MODEL_NAME,
              "--host", "0.0.0.0", "--port", "8000",
              "--max-model-len", "2048",
              "--gpu-memory-utilization", "0.9",
              "--enforce-eager"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=vllm_env
         )
         threading.Thread(target=_stream_logs, args=("vllm", vllm_proc), daemon=True).start()
 
