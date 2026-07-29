@@ -476,6 +476,7 @@ def _build_ext_modules():
         "csrc/gemm/gpu_mining_launch.cu",
         "csrc/gemm/gpu_mining_graph.cu",
         "csrc/gemm/pearl_gemm_api_kernels.cu",
+        "csrc/gemm/candidate_gen/gpu_candidate_generation.cu",
         "csrc/stark/gpu_stark_kernels.cu",
         "csrc/stark/gpu_stark_launch.cu",
         "csrc/blake3/blake3.cu",
