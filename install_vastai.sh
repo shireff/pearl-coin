@@ -15,7 +15,7 @@ nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader || {
 echo "=== Step 3/5: Checking CUDA toolkit (nvcc) ==="
 if ! command -v nvcc &> /dev/null; then
     echo "Installing CUDA toolkit..."
-    apt-get install -y -qq cuda-toolkit-13-0 || apt-get install -y -qq cuda-toolkit || {
+    apt-get install -y -qq cuda-toolkit-12-4 || apt-get install -y -qq cuda-toolkit-13-0 || apt-get install -y -qq cuda-toolkit || {
         echo "ERROR: Failed to install CUDA toolkit."
         exit 1
     }

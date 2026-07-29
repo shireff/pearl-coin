@@ -348,6 +348,14 @@ def _get_cuda_bare_metal_version(cuda_dir: str):
     return raw_output, bare_metal_version
 
 
+def _is_cuda_13_or_later(cuda_dir: str) -> bool:
+    try:
+        _, ver = _get_cuda_bare_metal_version(cuda_dir)
+        return ver >= parse("13.0")
+    except Exception:
+        return False
+
+
 def _warn_if_cuda_home_missing(cuda_home) -> None:
     if cuda_home is not None:
         return
@@ -506,6 +514,14 @@ def _build_ext_modules():
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0",
         "-DNDEBUG",
     ]
+
+    if _is_cuda_13_or_later(CUDA_HOME):
+        nvcc_flags += [
+            "-U__CCCL_CPP_STD_NAMESPACE",
+            "-Xcompiler",
+            "-fpermissive",
+        ]
+        print("Detected CUDA 13.0+, applying CCCL namespace workaround")
 
     include_dirs = [
         CSRC_DIR,
