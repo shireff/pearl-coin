@@ -190,6 +190,7 @@ build_pearl_gemm() {
     export CXX=/usr/bin/g++
     export CC=/usr/bin/gcc
     cd "$gemm_dir"
+    python3 -m pip install -e "$REPO_ROOT/miner/pearl-gemm-build-utils"
     rm -rf build src/*.so 2>/dev/null || true
     python3 setup.py build_ext --inplace
     info "pearl-gemm build complete"
