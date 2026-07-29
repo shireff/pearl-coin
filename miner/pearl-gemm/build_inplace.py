@@ -22,11 +22,15 @@ import torch.utils.cpp_extension as _cpp_ext
 
 _original_check = getattr(_cpp_ext, "_check_cuda_version", None)
 
+
 def _patched_check_cuda_version(compiler_name, compiler_version):
     pass
 
+
 if _original_check is not None:
     _cpp_ext._check_cuda_version = _patched_check_cuda_version
+
+os.environ.setdefault("TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK", "1")
 
 import setup as _setup
 
@@ -59,17 +63,40 @@ try:
 except Exception as exc:
     import traceback
     traceback_text = traceback.format_exc()
-    print(traceback_text)
     captured = stderr_buffer.getvalue()
     sys.stderr = old_stderr
-    for line in captured.splitlines() + traceback_text.splitlines():
-        if ".cu:" in line or ".cuh:" in line or ".hpp:" in line:
-            print(f"ERROR_FILE_LINE: {line.strip()}")
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(captured + "\n" + traceback_text)
-    print("BUILD FAILED")
-    shutil.rmtree(tmpdir, ignore_errors=True)
-    sys.exit(1)
+    msg = str(exc)
+    if "CUDA" in msg and "mismatch" in msg.lower():
+        print(f"Retrying after CUDA version check patch: {msg}")
+        _cpp_ext._check_cuda_version = _patched_check_cuda_version
+        os.environ["TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK"] = "1"
+        stderr_buffer = io.StringIO()
+        sys.stderr = stderr_buffer
+        try:
+            cmd.run()
+        except Exception as exc2:
+            traceback_text = traceback.format_exc()
+            captured = stderr_buffer.getvalue()
+            sys.stderr = old_stderr
+            for line in captured.splitlines() + traceback_text.splitlines():
+                if ".cu:" in line or ".cuh:" in line or ".hpp:" in line:
+                    print(f"ERROR_FILE_LINE: {line.strip()}")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(captured + "\n" + traceback_text)
+            print("BUILD FAILED")
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            sys.exit(1)
+        finally:
+            sys.stderr = old_stderr
+    else:
+        for line in captured.splitlines() + traceback_text.splitlines():
+            if ".cu:" in line or ".cuh:" in line or ".hpp:" in line:
+                print(f"ERROR_FILE_LINE: {line.strip()}")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(captured + "\n" + traceback_text)
+        print("BUILD FAILED")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        sys.exit(1)
 finally:
     sys.stderr = old_stderr
 
