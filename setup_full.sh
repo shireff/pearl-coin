@@ -153,6 +153,7 @@ build_go_binaries() {
     cd "$REPO_ROOT"
     mkdir -p "$BIN_DIR"
     build_xmss
+    cd "$REPO_ROOT"
     go build -tags xmss,zkpow -o "$BIN_DIR/pearld" ./node
     go build -tags xmss,zkpow -o "$BIN_DIR/prlctl" ./node/cmd/prlctl
     if [ -d "$REPO_ROOT/wallet" ]; then
