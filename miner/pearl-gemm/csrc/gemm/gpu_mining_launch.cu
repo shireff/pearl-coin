@@ -2,6 +2,7 @@
 #include "gpu_mining_wmma.cuh"
 #include <cuda_runtime.h>
 #include <cassert>
+#include <cstdio>
 
 namespace pearl {
 namespace mining {
