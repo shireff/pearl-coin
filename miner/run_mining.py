@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 
-CLONE_DIR = "/root/pearl"
+CLONE_DIR = "/root/pearl-cion"
 MODEL_NAME = "pearl-ai/Llama-3.2-1B-Instruct-pearl"
 
 TILE_SIZE_M = 256
