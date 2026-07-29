@@ -14,7 +14,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-export CUDA_HOME=/usr/local/cuda-12.4
+if [ -z "${CUDA_HOME:-}" ]; then
+    for candidate in /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0; do
+        if [ -x "$candidate/bin/nvcc" ]; then
+            CUDA_HOME="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "${CUDA_HOME:-}" ]; then
+    echo "ERROR: CUDA_HOME is not set and no supported CUDA toolkit was found."
+    echo "Install CUDA 13.x and export CUDA_HOME=/usr/local/cuda-13.x"
+    exit 1
+fi
+
+CUDA_VERSION="$($CUDA_HOME/bin/nvcc -V 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+')"
+if [ -z "${CUDA_VERSION:-}" ]; then
+    echo "ERROR: Could not determine CUDA version from $CUDA_HOME/bin/nvcc"
+    exit 1
+fi
+
+if printf '%s\n' "$CUDA_VERSION" "13.0" | sort -V | head -n1 | grep -qv "13.0"; then
+    echo "ERROR: CUDA 13.0+ is required for pearl-gemm, but found CUDA $CUDA_VERSION"
+    exit 1
+fi
+
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
