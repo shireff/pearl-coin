@@ -497,9 +497,9 @@ def _build_ext_modules():
 
     feature_args = [f"-D{name}" for name, enabled in FEATURE_FLAGS.items() if enabled]
 
-    gcc_flags = ["-O3", "-std=c++20", "-fvisibility=hidden"]
+    gcc_flags = ["-O3", "-std=c++17", "-fvisibility=hidden"]
     nvcc_flags = [
-        "-O3", "-std=c++20",
+        "-O3", "-std=c++17",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_OPERATORS__",
