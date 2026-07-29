@@ -170,20 +170,25 @@ build_pearl_gemm() {
         info "pearl-gemm/setup.py not found, skipping CUDA build"
         return
     fi
-    # Auto-detect CUDA installation
+    # Auto-detect CUDA — prefer the version matching PyTorch's compiled CUDA
     if [ -z "${CUDA_HOME:-}" ]; then
-        for cuda_candidate in /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda; do
+        TORCH_CUDA_VER=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null | tr -d '.')
+        for cuda_candidate in \
+            "/usr/local/cuda-$(python3 -c "import torch; v=torch.version.cuda; print(v)" 2>/dev/null)" \
+            /usr/local/cuda-12.4 \
+            /usr/local/cuda-12.6 \
+            /usr/local/cuda; do
             if [ -f "$cuda_candidate/bin/nvcc" ]; then
                 CUDA_HOME="$cuda_candidate"
                 break
             fi
         done
-        CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+        CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.4}"
     fi
     export CUDA_HOME
+    export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-    export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
     export PEARL_GEMM_ARCH="${PEARL_GEMM_ARCH:-arch=compute_89,code=sm_89}"
     export MAX_JOBS="${MAX_JOBS:-4}"
     export NVCC_PREPEND_FLAGS=""
