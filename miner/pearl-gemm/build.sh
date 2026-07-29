@@ -20,6 +20,11 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
 export PEARL_GEMM_ARCH="arch=compute_89,code=sm_89"
 export MAX_JOBS="$JOBS"
+# Override container-level NVCC_PREPEND_FLAGS that points ccache as host compiler
+export NVCC_PREPEND_FLAGS=""
+export CUDAHOSTCXX=/usr/bin/g++
+export CXX=/usr/bin/g++
+export CC=/usr/bin/gcc
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 GEMM_DIR="$REPO_ROOT/miner/pearl-gemm"
@@ -39,7 +44,7 @@ fi
 echo ""
 echo "[2/3] Cleaning previous build..."
 cd "$GEMM_DIR"
-rm -rf build *.so 2>/dev/null || true
+rm -rf build src/*.so 2>/dev/null || true
 
 echo ""
 echo "[3/3] Building..."
@@ -53,4 +58,4 @@ END=$(date +%s)
 
 echo ""
 echo "=== Build complete in $((END - START))s ==="
-ls -lh "$GEMM_DIR"/*.so 2>/dev/null && echo "Extension built successfully." || echo "WARNING: no .so found"
+find "$GEMM_DIR" -name "*.so" 2>/dev/null | head -5 && echo "Extension built successfully." || echo "WARNING: no .so found"
