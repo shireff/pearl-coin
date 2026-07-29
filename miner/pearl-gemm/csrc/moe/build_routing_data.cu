@@ -5,6 +5,7 @@
 #include <torch/types.h>
 
 #include <cub/cub.cuh>
+#include <cub/device/device_for.cuh>
 
 namespace {
 
