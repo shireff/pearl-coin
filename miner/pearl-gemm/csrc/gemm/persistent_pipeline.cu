@@ -31,11 +31,11 @@ __global__ void persistent_mining_worker_kernel(
         // FIX #6: claim a slot with a single CAS instead of the ABA-prone
         // add/sub pattern; exponential back-off (100 ns → 3200 ns) replaces
         // the fixed 1000 ns sleep, reducing idle warp overhead by ~6×.
-        uint32_t old_tail = atomicAdd(&queue->tail, 1);
+        uint32_t old_tail = atomicAdd(const_cast<uint32_t*>(&queue->tail), 1u);
         uint32_t head     = queue->head;
         if (old_tail >= head) {
             // No job available; undo the claim and back off.
-            atomicSub(&queue->tail, 1);
+            atomicSub(const_cast<uint32_t*>(&queue->tail), 1u);
             // Exponential back-off: start at 100 ns, cap at 3200 ns.
             uint32_t sleep_ns = 100;
             #pragma unroll 1
@@ -127,6 +127,7 @@ struct PersistentPipelineStateImpl {
     cudaStream_t stream;
     cudaEvent_t job_event;
     volatile uint32_t* completion_signal;
+    uint32_t max_jackpots;
     size_t jackpots_size;
     size_t hashes_size;
     bool initialized;
@@ -182,7 +183,11 @@ PersistentPipelineState* create_persistent_pipeline(uint32_t max_jackpots) {
     }
 
     // Allocate completion signal in pinned host/device memory
-    err = cudaHostAlloc(reinterpret_cast<void**>(&state->completion_signal), sizeof(uint32_t), cudaHostAllocMapped);
+    {
+        void* tmp = nullptr;
+        err = cudaHostAlloc(&tmp, sizeof(uint32_t), cudaHostAllocMapped);
+        state->completion_signal = static_cast<volatile uint32_t*>(tmp);
+    }
     if (err != cudaSuccess) {
         cudaEventDestroy(state->job_event);
         cudaStreamDestroy(state->stream);
@@ -201,7 +206,7 @@ PersistentPipelineState* create_persistent_pipeline(uint32_t max_jackpots) {
     h_queue.num_blocks = MAX_BATCH_SIZE;
     err = cudaMemcpy(state->d_queue, &h_queue, sizeof(PersistentJobQueue), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
-        cudaFreeHost(reinterpret_cast<void*>(state->completion_signal));
+        cudaFreeHost(const_cast<uint32_t*>(state->completion_signal));
         cudaEventDestroy(state->job_event);
         cudaStreamDestroy(state->stream);
         cudaFree(state->d_hashes);
@@ -233,7 +238,7 @@ void destroy_persistent_pipeline(PersistentPipelineState* state) {
     if (impl->d_hashes) cudaFree(impl->d_hashes);
     if (impl->d_jackpots) cudaFree(impl->d_jackpots);
     if (impl->d_queue) cudaFree(impl->d_queue);
-    if (impl->completion_signal) cudaFreeHost(reinterpret_cast<void*>(impl->completion_signal));
+    if (impl->completion_signal) cudaFreeHost(const_cast<uint32_t*>(impl->completion_signal));
 
     delete impl;
 }
