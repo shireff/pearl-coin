@@ -170,20 +170,22 @@ build_pearl_gemm() {
         info "pearl-gemm/setup.py not found, skipping CUDA build"
         return
     fi
-    # Auto-detect CUDA — prefer the version matching PyTorch's compiled CUDA
+    # Force CUDA_HOME to match the version PyTorch was compiled with.
+    # Reading torch.version.cuda directly avoids nvcc version mismatch errors.
     if [ -z "${CUDA_HOME:-}" ]; then
-        TORCH_CUDA_VER=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null | tr -d '.')
-        for cuda_candidate in \
-            "/usr/local/cuda-$(python3 -c "import torch; v=torch.version.cuda; print(v)" 2>/dev/null)" \
-            /usr/local/cuda-12.4 \
-            /usr/local/cuda-12.6 \
-            /usr/local/cuda; do
-            if [ -f "$cuda_candidate/bin/nvcc" ]; then
-                CUDA_HOME="$cuda_candidate"
-                break
-            fi
-        done
-        CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.4}"
+        TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "12.4")
+        PREFERRED="/usr/local/cuda-${TORCH_CUDA}"
+        if [ -f "$PREFERRED/bin/nvcc" ]; then
+            CUDA_HOME="$PREFERRED"
+        else
+            for cuda_candidate in /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda; do
+                if [ -f "$cuda_candidate/bin/nvcc" ]; then
+                    CUDA_HOME="$cuda_candidate"
+                    break
+                fi
+            done
+            CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.4}"
+        fi
     fi
     export CUDA_HOME
     export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
