@@ -1001,9 +1001,9 @@ HostSignalHeader get_host_signal_header(at::Tensor& host_signal_header_pinned) {
 at::Tensor run_gpu_lde_eval(
     at::Tensor coeffs,
     at::Tensor eval_points,
-    int num_coeffs,
-    int num_points,
-    int poly_degree) {
+    int64_t num_coeffs,
+    int64_t num_points,
+    int64_t poly_degree) {
   CHECK_DEVICE(coeffs);
   CHECK_DEVICE(eval_points);
   CHECK_CONTIGUOUS(coeffs);
@@ -1019,7 +1019,9 @@ at::Tensor run_gpu_lde_eval(
       coeffs.data_ptr<uint32_t>(),
       eval_points.data_ptr<uint32_t>(),
       evaluations.data_ptr<uint32_t>(),
-      num_coeffs, num_points, poly_degree,
+      static_cast<int>(num_coeffs),
+      static_cast<int>(num_points),
+      static_cast<int>(poly_degree),
       stream);
 
   cudaStreamSynchronize(stream);
@@ -1030,7 +1032,7 @@ at::Tensor run_gpu_lde_eval(
 at::Tensor run_gpu_fri_fold(
     at::Tensor layer,
     at::Tensor challenges,
-    int layer_size) {
+    int64_t layer_size) {
   CHECK_DEVICE(layer);
   CHECK_DEVICE(challenges);
   CHECK_CONTIGUOUS(layer);
@@ -1046,7 +1048,7 @@ at::Tensor run_gpu_fri_fold(
       layer.data_ptr<uint32_t>(),
       folded.data_ptr<uint32_t>(),
       challenges.data_ptr<uint32_t>(),
-      layer_size,
+      static_cast<int>(layer_size),
       stream);
 
   cudaStreamSynchronize(stream);
@@ -1056,7 +1058,7 @@ at::Tensor run_gpu_fri_fold(
 // Python binding for GPU Merkle hashing
 at::Tensor run_gpu_merkle_hash(
     at::Tensor leaves,
-    int num_leaves) {
+    int64_t num_leaves) {
   CHECK_DEVICE(leaves);
   CHECK_CONTIGUOUS(leaves);
 
@@ -1069,7 +1071,7 @@ at::Tensor run_gpu_merkle_hash(
   pearl::stark::launch_merkle_hash(
       leaves.data_ptr<uint32_t>(),
       nodes.data_ptr<uint32_t>(),
-      num_leaves,
+      static_cast<int>(num_leaves),
       0,
       stream);
 
@@ -1499,18 +1501,24 @@ cudaError_t synchronize_mining_graph_state(MiningGraphState* state) {
     return pearl::mining::synchronize_mining_graph(state);
 }
 
-// Persistent Pipeline API
+// Persistent Pipeline API — uses uintptr_t handles to avoid pybind11 incomplete-type issues.
+// PersistentPipelineState is forward-declared only; pybind11 cannot use typeid() on it.
 
-PersistentPipelineState* create_persistent_pipeline_api(uint32_t max_jackpots) {
-    return pearl::persistent::create_persistent_pipeline(max_jackpots);
+static inline PersistentPipelineState* to_pipeline(uintptr_t h) {
+    return reinterpret_cast<PersistentPipelineState*>(h);
 }
 
-void destroy_persistent_pipeline_api(PersistentPipelineState* state) {
-    pearl::persistent::destroy_persistent_pipeline(state);
+uintptr_t create_persistent_pipeline_api(uint32_t max_jackpots) {
+    return reinterpret_cast<uintptr_t>(
+        pearl::persistent::create_persistent_pipeline(max_jackpots));
+}
+
+void destroy_persistent_pipeline_api(uintptr_t handle) {
+    pearl::persistent::destroy_persistent_pipeline(to_pipeline(handle));
 }
 
 cudaError_t pipeline_set_buffers_api(
-    PersistentPipelineState* state,
+    uintptr_t handle,
     at::Tensor a_noised,
     at::Tensor b_noised_t,
     at::Tensor a_rows,
@@ -1520,9 +1528,8 @@ cudaError_t pipeline_set_buffers_api(
     CHECK_DEVICE(b_noised_t);
     CHECK_DEVICE(a_rows);
     CHECK_DEVICE(b_cols);
-
     return pearl::persistent::pipeline_set_buffers(
-        state,
+        to_pipeline(handle),
         a_noised.data_ptr<int32_t>(),
         b_noised_t.data_ptr<int32_t>(),
         a_rows.data_ptr<int32_t>(),
@@ -1531,54 +1538,47 @@ cudaError_t pipeline_set_buffers_api(
 }
 
 cudaError_t pipeline_enqueue_jobs_api(
-    PersistentPipelineState* state,
+    uintptr_t handle,
     at::Tensor jobs,
     uint64_t num_jobs
 ) {
     CHECK_DEVICE(jobs);
     CHECK_CONTIGUOUS(jobs);
-
     return pearl::persistent::pipeline_enqueue_jobs(
-        state,
+        to_pipeline(handle),
         reinterpret_cast<pearl::persistent::PersistentJob*>(jobs.data_ptr()),
         static_cast<uint32_t>(num_jobs)
     );
 }
 
-cudaError_t pipeline_wait_for_completion_api(PersistentPipelineState* state) {
-    return pearl::persistent::pipeline_wait_for_completion(state);
+cudaError_t pipeline_wait_for_completion_api(uintptr_t handle) {
+    return pearl::persistent::pipeline_wait_for_completion(to_pipeline(handle));
 }
 
-cudaError_t pipeline_get_jackpots_api(
-    PersistentPipelineState* state,
-    uint64_t* size
-) {
+cudaError_t pipeline_get_jackpots_api(uintptr_t handle, uint64_t* size) {
     uint32_t* jackpots;
     size_t sz;
-    cudaError_t err = pearl::persistent::pipeline_get_jackpots(state, &jackpots, &sz);
+    cudaError_t err = pearl::persistent::pipeline_get_jackpots(to_pipeline(handle), &jackpots, &sz);
     if (err != cudaSuccess) return err;
     *size = sz;
     return cudaSuccess;
 }
 
-cudaError_t pipeline_get_hashes_api(
-    PersistentPipelineState* state,
-    uint64_t* size
-) {
+cudaError_t pipeline_get_hashes_api(uintptr_t handle, uint64_t* size) {
     uint32_t* hashes;
     size_t sz;
-    cudaError_t err = pearl::persistent::pipeline_get_hashes(state, &hashes, &sz);
+    cudaError_t err = pearl::persistent::pipeline_get_hashes(to_pipeline(handle), &hashes, &sz);
     if (err != cudaSuccess) return err;
     *size = sz;
     return cudaSuccess;
 }
 
-void launch_persistent_worker_api(PersistentPipelineState* state) {
-    pearl::persistent::launch_persistent_worker(state);
+void launch_persistent_worker_api(uintptr_t handle) {
+    pearl::persistent::launch_persistent_worker(to_pipeline(handle));
 }
 
-cudaError_t stop_persistent_worker_api(PersistentPipelineState* state) {
-    return pearl::persistent::stop_persistent_worker(state);
+cudaError_t stop_persistent_worker_api(uintptr_t handle) {
+    return pearl::persistent::stop_persistent_worker(to_pipeline(handle));
 }
 
 extern "C" {
