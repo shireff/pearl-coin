@@ -44,16 +44,33 @@ struct alignas(16) MiningResult {
 };
 
 void launch_gpu_mining(
-    const int32_t* d_a_noised,
-    const int32_t* d_b_noised_t,
-    const int32_t* d_a_rows,
-    const int32_t* d_b_cols,
-    MiningJob* d_jobs,
-    MiningResult* d_results,
-    uint32_t num_jobs,
-    uint32_t max_tile_h,
-    uint32_t max_tile_w,
+    const int32_t* a_noised,
+    const int32_t* b_noised_t,
+    const int32_t* a_rows_data,
+    const int32_t* b_cols_data,
+    const MiningJob* jobs,
+    uint32_t* jackpots,
+    uint32_t* hashes,
+    uint8_t* winner_flags,
+    uint32_t num_candidates,
+    uint32_t P,
+    uint32_t Q,
+    uint32_t tile_h,
+    uint32_t tile_w,
+    uint32_t m,
+    uint32_t n,
+    uint32_t k,
+    uint32_t rank,
     cudaStream_t stream);
+
+__device__ __forceinline__ bool blake3_check_difficulty(
+    const uint32_t* hash,
+    const uint32_t* target);
+
+__device__ __forceinline__ void blake3_keyed_hash_inline(
+    const uint32_t* msg,
+    const uint32_t* key,
+    uint32_t* output);
 
 void launch_gpu_jackpot_hash(
     const uint32_t* jackpots,

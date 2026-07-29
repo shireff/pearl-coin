@@ -24,29 +24,46 @@ cudaError_t create_mining_graph(MiningGraphState* state, uint32_t num_candidates
         return err;
     }
 
-    dim3 block(128);
-    dim3 grid(num_candidates);
-    const int hash_threads = 256;
-    const int hash_blocks = (num_candidates * num_combos + hash_threads - 1) / hash_threads;
+    const uint32_t P = num_combos;
+    const uint32_t Q = 1;
 
-    MiningJob dummy_jobs[1] = {};
-    MiningResult dummy_results[1] = {};
-    uint32_t dummy_keys[8] = {};
-    uint32_t dummy_hashes[1] = {};
+    int32_t* d_a_rows = nullptr;
+    int32_t* d_b_cols = nullptr;
+    uint32_t* d_jackpots = nullptr;
+    uint32_t* d_hashes = nullptr;
+    uint8_t* d_winner_flags = nullptr;
+
+    MiningJob* d_jobs = nullptr;
+    cudaMalloc(&d_jobs, num_candidates * sizeof(MiningJob));
+    for (uint32_t i = 0; i < num_candidates; i++) {
+        d_jobs[i].status = JOB_STATUS_STOP;
+    }
+    cudaMalloc(&d_a_rows, P * tile_h * sizeof(int32_t));
+    cudaMalloc(&d_b_cols, Q * tile_w * sizeof(int32_t));
+    cudaMalloc(&d_jackpots, num_candidates * num_combos * JACKPOT_SIZE * sizeof(uint32_t));
+    cudaMalloc(&d_hashes, num_candidates * num_combos * 8 * sizeof(uint32_t));
+    cudaMalloc(&d_winner_flags, (num_candidates * num_combos + 7) / 8 * sizeof(uint8_t));
 
     launch_gpu_mining(
-        nullptr, nullptr, nullptr, nullptr,
-        dummy_jobs, dummy_results,
-        num_candidates, tile_h, tile_w,
+        nullptr, nullptr, d_a_rows, d_b_cols,
+        d_jobs, d_jackpots, d_hashes, d_winner_flags,
+        num_candidates, P, Q, tile_h, tile_w, m, n, k, rank,
         state->stream
     );
 
+    uint32_t dummy_keys[8] = {};
     launch_gpu_jackpot_hash(
-        reinterpret_cast<const uint32_t*>(dummy_results),
-        dummy_keys, dummy_hashes,
-        num_candidates, 1,
+        d_jackpots, dummy_keys, d_hashes,
+        num_candidates, num_combos,
         state->stream
     );
+
+    cudaFree(d_jobs);
+    cudaFree(d_a_rows);
+    cudaFree(d_b_cols);
+    cudaFree(d_jackpots);
+    cudaFree(d_hashes);
+    cudaFree(d_winner_flags);
 
     err = cudaStreamEndCapture(state->stream, &state->graph);
     if (err != cudaSuccess) {
@@ -83,33 +100,49 @@ cudaError_t update_mining_graph(MiningGraphState* state, uint32_t num_candidates
         return cudaSuccess;
     }
 
-    cudaGraph_t new_graph;
     cudaError_t err = cudaStreamBeginCapture(state->stream, cudaStreamCaptureModeGlobal);
     if (err != cudaSuccess) return err;
 
-    dim3 block(128);
-    dim3 grid(num_candidates);
-    const int hash_threads = 256;
-    const int hash_blocks = (num_candidates * num_combos + hash_threads - 1) / hash_threads;
+    const uint32_t P = num_combos;
+    const uint32_t Q = 1;
 
-    MiningJob dummy_jobs[1] = {};
-    MiningResult dummy_results[1] = {};
-    uint32_t dummy_keys[8] = {};
-    uint32_t dummy_hashes[1] = {};
+    int32_t* d_a_rows = nullptr;
+    int32_t* d_b_cols = nullptr;
+    uint32_t* d_jackpots = nullptr;
+    uint32_t* d_hashes = nullptr;
+    uint8_t* d_winner_flags = nullptr;
+
+    MiningJob* d_jobs = nullptr;
+    cudaMalloc(&d_jobs, num_candidates * sizeof(MiningJob));
+    for (uint32_t i = 0; i < num_candidates; i++) {
+        d_jobs[i].status = JOB_STATUS_STOP;
+    }
+    cudaMalloc(&d_a_rows, P * tile_h * sizeof(int32_t));
+    cudaMalloc(&d_b_cols, Q * tile_w * sizeof(int32_t));
+    cudaMalloc(&d_jackpots, num_candidates * num_combos * JACKPOT_SIZE * sizeof(uint32_t));
+    cudaMalloc(&d_hashes, num_candidates * num_combos * 8 * sizeof(uint32_t));
+    cudaMalloc(&d_winner_flags, (num_candidates * num_combos + 7) / 8 * sizeof(uint8_t));
 
     launch_gpu_mining(
-        nullptr, nullptr, nullptr, nullptr,
-        dummy_jobs, dummy_results,
-        num_candidates, tile_h, tile_w,
+        nullptr, nullptr, d_a_rows, d_b_cols,
+        d_jobs, d_jackpots, d_hashes, d_winner_flags,
+        num_candidates, P, Q, tile_h, tile_w, m, n, k, rank,
         state->stream
     );
 
+    uint32_t dummy_keys[8] = {};
     launch_gpu_jackpot_hash(
-        reinterpret_cast<const uint32_t*>(dummy_results),
-        dummy_keys, dummy_hashes,
-        num_candidates, 1,
+        d_jackpots, dummy_keys, d_hashes,
+        num_candidates, num_combos,
         state->stream
     );
+
+    cudaFree(d_jobs);
+    cudaFree(d_a_rows);
+    cudaFree(d_b_cols);
+    cudaFree(d_jackpots);
+    cudaFree(d_hashes);
+    cudaFree(d_winner_flags);
 
     err = cudaStreamEndCapture(state->stream, &new_graph);
     if (err != cudaSuccess) return err;

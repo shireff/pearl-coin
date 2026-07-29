@@ -1,4 +1,5 @@
 #include "gpu_mining_kernel.cuh"
+#include "blake3/blake3.cuh"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstring>
@@ -286,7 +287,6 @@ void gpu_mining_kernel(
 
         // FIX #13: use __pipeline_memcpy_async for A and B tile staging.
         // This issues cp.async instructions so loads overlap with compute.
-        #include <cuda/pipeline>
         cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
 
         for (int idx = threadIdx.x; idx < tile_h * rank; idx += blockDim.x) {
