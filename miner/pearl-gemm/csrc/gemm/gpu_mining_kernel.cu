@@ -1,6 +1,7 @@
 #include "gpu_mining_kernel.cuh"
 #include "blake3/blake3.cuh"
 #include <cuda_runtime.h>
+#include <cuda/pipeline>
 #include <cstdint>
 #include <cstring>
 
