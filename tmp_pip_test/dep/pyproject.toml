@@ -1,0 +1,8 @@
+[project]
+name = "dep"
+version = "0.0.1"
+description = "test dep"
+requires-python = ">=3.12"
+[build-system]
+requires=["setuptools>=61","wheel"]
+build-backend="setuptools.build_meta"
