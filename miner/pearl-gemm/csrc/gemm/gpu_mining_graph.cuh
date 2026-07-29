@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
+#include "gpu_mining_kernel.cuh"
 
 namespace pearl {
 namespace mining {
