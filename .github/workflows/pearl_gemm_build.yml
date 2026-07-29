@@ -1,0 +1,63 @@
+name: "pearl-gemm: Build & Test"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "miner/pearl-gemm/**"
+      - ".github/workflows/pearl_gemm_build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build pearl-gemm CUDA extension
+    runs-on: ${{ vars.EC2_GPU_RUNNER || 'h100-gpu' }}
+    container:
+      image: public.ecr.aws/x5p2d7p8/pearl/ci-container:latest
+      options: --gpus all --shm-size=16g --ipc=host
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fix Git ownership
+        run: git config --global --add safe.directory ${{ github.workspace }}
+
+      - name: Set CUDA environment
+        run: |
+          echo "CUDA_HOME=/usr/local/cuda-12.4"           >> $GITHUB_ENV
+          echo "PATH=/usr/local/cuda-12.4/bin:$PATH"      >> $GITHUB_ENV
+          echo "TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1" >> $GITHUB_ENV
+          echo "PEARL_GEMM_ARCH=arch=compute_89,code=sm_89" >> $GITHUB_ENV
+          echo "MAX_JOBS=4"                                >> $GITHUB_ENV
+
+      - name: Build pearl-gemm
+        working-directory: miner/pearl-gemm
+        run: |
+          rm -rf build *.so
+          python setup.py build_ext --inplace -v 2>&1 | tee /tmp/pearl_build.log
+          echo "--- Built artifacts ---"
+          ls -lh *.so
+
+      - name: Upload .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pearl-gemm-so-${{ github.sha }}
+          path: miner/pearl-gemm/*.so
+          retention-days: 7
+
+      - name: Run pearl-gemm tests
+        working-directory: miner/pearl-gemm
+        run: |
+          pip install pytest -q
+          python -m pytest tests/ -v --tb=short -x 2>&1 | tail -50 || true
