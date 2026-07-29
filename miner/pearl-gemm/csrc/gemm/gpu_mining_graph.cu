@@ -144,6 +144,7 @@ cudaError_t update_mining_graph(MiningGraphState* state, uint32_t num_candidates
     cudaFree(d_hashes);
     cudaFree(d_winner_flags);
 
+    cudaGraph_t new_graph;
     err = cudaStreamEndCapture(state->stream, &new_graph);
     if (err != cudaSuccess) return err;
 
