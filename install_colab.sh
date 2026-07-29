@@ -18,9 +18,9 @@ case "$GPU_NAME" in
     *H100*|*H200*) export PEARL_GEMM_ARCH="arch=compute_90a,code=sm_90a" ;;
     *A100*|*A10G*) export PEARL_GEMM_ARCH="arch=compute_80,code=sm_80" ;;
     *L40*|*L4*)    export PEARL_GEMM_ARCH="arch=compute_86,code=sm_86" ;;
-    *T4*)          export PEARL_GEMM_ARCH="arch=compute_75,code=sm_75" ;;
+    *4060*|*4070*|*4080*|*4090*|*T4*) export PEARL_GEMM_ARCH="arch=compute_89,code=sm_89" ;;
     *V100*)        export PEARL_GEMM_ARCH="arch=compute_70,code=sm_70" ;;
-    *)             echo "WARNING: Unknown GPU '$GPU_NAME', defaulting to sm_90a (may fail on older GPUs)"; export PEARL_GEMM_ARCH="arch=compute_90a,code=sm_90a" ;;
+    *)             echo "WARNING: Unknown GPU '$GPU_NAME', defaulting to sm_89 (Ada Lovelace / RTX 40xx)"; export PEARL_GEMM_ARCH="arch=compute_89,code=sm_89" ;;
 esac
 echo "Using PEARL_GEMM_ARCH=$PEARL_GEMM_ARCH"
 

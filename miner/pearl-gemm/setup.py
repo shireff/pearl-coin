@@ -84,7 +84,7 @@ CORES_PER_JOB = 1
 FALLBACK_MAX_JOBS = 4
 KB_PER_GB = 1024 * 1024
 NVCC_THREAD_COUNT = "4"
-COMPUTE_CAPABILITY = os.getenv("PEARL_GEMM_ARCH", "arch=compute_120,code=sm_120")
+COMPUTE_CAPABILITY = os.getenv("PEARL_GEMM_ARCH", "")
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +364,46 @@ def _append_nvcc_threads(nvcc_extra_args: list[str]) -> list[str]:
     return nvcc_extra_args + ["--threads", NVCC_THREAD_COUNT]
 
 
+def _resolve_compute_capability() -> str:
+    """Return the compute capability flag string.
+
+    Priority:
+      1. PEARL_GEMM_ARCH environment variable
+      2. torch.cuda.get_device_capability() if torch is available
+      3. nvidia-smi parsing
+      4. Fallback to sm_89 (Ada Lovelace / RTX 40xx)
+    """
+    env_arch = os.getenv("PEARL_GEMM_ARCH")
+    if env_arch:
+        return env_arch
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            return f"arch=compute_{major}{minor},code=sm_{major}{minor}"
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            universal_newlines=True,
+        )
+        cap = output.strip().split("\n")[0].strip()
+        if "." in cap:
+            major, minor = cap.split(".")
+            minor = minor[:2].ljust(2, "0")
+            return f"arch=compute_{major}{minor},code=sm_{major}{minor}"
+    except Exception:
+        pass
+
+    return "arch=compute_89,code=sm_89"
+
+
 def _build_ext_modules():
     """
     Build and return the list of Extension objects.
@@ -398,7 +438,7 @@ def _build_ext_modules():
     _, bare_metal_version = _get_cuda_bare_metal_version(CUDA_HOME)
     print(f"cuda version = {bare_metal_version}\n")
 
-    arch_flags = ["-gencode", COMPUTE_CAPABILITY]
+    arch_flags = ["-gencode", _resolve_compute_capability()]
 
     if not SKIP_CPP_GENERATION:
         instantiations_dir = GEMM_DIR / "instantiations"
