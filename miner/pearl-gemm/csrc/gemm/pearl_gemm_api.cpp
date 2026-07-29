@@ -36,6 +36,11 @@ using pearl::jackpot::JACKPOT_SIZE;
 #include "persistent_pipeline.cuh"
 #include "candidate_gen/gpu_candidate_generation.cuh"
 
+using pearl::mining::MiningGraphState;
+using pearl::mining::MiningJob;
+using pearl::persistent::PersistentPipelineState;
+using pearl::persistent::PersistentJob;
+
 namespace PYBIND11_NAMESPACE {
 namespace detail {
 
