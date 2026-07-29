@@ -599,6 +599,10 @@ class PearlBuildExtension(_BuildExtBase):
         print(f"DEBUG: extensions count = {len(self.extensions or [])}", flush=True)
         for ext in (self.extensions or []):
             print(f"DEBUG: extension name = {ext.name}", flush=True)
+        # setuptools compat: add missing _needs_stub attribute to Extension objects
+        for ext in (self.extensions or []):
+            if not hasattr(ext, '_needs_stub'):
+                ext._needs_stub = False
         super().build_extensions()
         print("DEBUG: super().build_extensions() returned", flush=True)
 
