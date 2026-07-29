@@ -23,6 +23,7 @@
 #include "../moe/build_routing_data.cuh"
 #include "../tensor_hash/tensor_hash_api.hpp"
 #include "jackpot_eval.cuh"
+using pearl::jackpot::JACKPOT_SIZE;
 #include "persistent_mining.cuh"
 #include "gpu_mining_kernel.cuh"
 #include "../stark/gpu_stark_kernels.cuh"
@@ -1236,39 +1237,8 @@ at::Tensor inner_hash(at::Tensor input_buffer, int64_t iterations) {
   return output;
 }
 
-// Simple kernel to launch blake3_keyed_hash for a batch of messages
-__global__ void blake3_keyed_hash_kernel(const uint32_t* messages, const uint32_t* key, uint32_t* outputs, int num_hashes) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < num_hashes) {
-    blake3::blake3_keyed_hash(messages + idx * 16, key, outputs + idx * 8);
-  }
-}
-
-at::Tensor blake3_keyed_hash(at::Tensor messages, at::Tensor key) {
-  CHECK_DEVICE(key);
-  CHECK_CONTIGUOUS(messages);
-  CHECK_CONTIGUOUS(key);
-
-  TORCH_CHECK(messages.dtype() == torch::kUInt32, "messages must be uint32 tensor");
-  TORCH_CHECK(key.dtype() == torch::kUInt32, "key must be uint32 tensor");
-  TORCH_CHECK(messages.dim() == 2, "messages must be 2D tensor (num_hashes, 16)");
-  TORCH_CHECK(key.dim() == 1, "key must be 1D tensor (8)");
-  TORCH_CHECK(messages.size(1) == 16, "messages must have 16 uint32s per hash");
-  TORCH_CHECK(key.size(0) == 8, "key must have 8 uint32s");
-
-  int num_hashes = messages.size(0);
-  at::cuda::CUDAGuard device_guard{(char)messages.get_device()};
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-  auto outputs = torch::empty({num_hashes, 8}, messages.options());
-
-  int threads = 256;
-  int blocks = (num_hashes + threads - 1) / threads;
-  blake3_keyed_hash_kernel<<<blocks, threads, 0, stream>>>(messages.data_ptr<uint32_t>(), key.data_ptr<uint32_t>(), outputs.data_ptr<uint32_t>(), num_hashes);
-
-  cudaStreamSynchronize(stream);
-  return outputs;
-}
+// Implemented in pearl_gemm_api_kernels.cu (compiled by nvcc)
+at::Tensor blake3_keyed_hash(at::Tensor messages, at::Tensor key);
 
 at::Tensor gpu_mine_batch(
     at::Tensor a_noised,      // num_jobs x m x k, int32

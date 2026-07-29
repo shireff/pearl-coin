@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cuda_runtime_api.h>
 
 namespace pearl {
 namespace persistent {
@@ -38,7 +39,6 @@ void launch_persistent_mining(
     uint32_t num_jobs,
     cudaStream_t stream);
 
-// Persistent pipeline API
 struct PersistentPipelineState;
 
 PersistentPipelineState* create_persistent_pipeline(uint32_t max_jackpots);

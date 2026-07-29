@@ -475,6 +475,7 @@ def _build_ext_modules():
         "csrc/gemm/gpu_mining_kernel.cu",
         "csrc/gemm/gpu_mining_launch.cu",
         "csrc/gemm/gpu_mining_graph.cu",
+        "csrc/gemm/pearl_gemm_api_kernels.cu",
         "csrc/stark/gpu_stark_kernels.cu",
         "csrc/stark/gpu_stark_launch.cu",
         "csrc/blake3/blake3.cu",
@@ -497,7 +498,7 @@ def _build_ext_modules():
 
     feature_args = [f"-D{name}" for name, enabled in FEATURE_FLAGS.items() if enabled]
 
-    gcc_flags = ["-O3", "-std=c++20", "-fvisibility=hidden"]
+    gcc_flags = ["-O3", "-std=c++20", "-fvisibility=hidden", "-fpermissive"]
     nvcc_flags = [
         "-O3", "-std=c++20",
         "-U__CUDA_NO_HALF_OPERATORS__",
