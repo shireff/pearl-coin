@@ -575,7 +575,7 @@ try:
     from torch.utils.cpp_extension import BuildExtension as _BuildExtBase
     _HAVE_BUILD_EXT = True
 except ImportError:
-    from setuptools import Command as _BuildExtBase
+    from setuptools.command.build_ext import build_ext as _BuildExtBase
     _HAVE_BUILD_EXT = False
 
 
