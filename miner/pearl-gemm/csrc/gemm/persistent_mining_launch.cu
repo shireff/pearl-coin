@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "persistent_mining.cuh"
 #include <cuda_runtime.h>
 #include <cassert>

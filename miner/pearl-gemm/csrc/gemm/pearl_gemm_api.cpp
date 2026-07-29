@@ -32,7 +32,6 @@ using pearl::jackpot::JACKPOT_SIZE;
 #include <optional>
 
 #include <iostream>
-#include "../blake3/blake3.cuh"
 #include "persistent_pipeline.cuh"
 #include "candidate_gen/gpu_candidate_generation.cuh"
 
