@@ -27,7 +27,7 @@ import urllib.request
 import warnings
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import setup, Extension
 
 # ---------------------------------------------------------------------------
 # Paths and static constants — safe to compute at import time
@@ -699,6 +699,7 @@ def _get_wheel_url() -> tuple[str, str]:
 
 if __name__ == "__main__":
     setup(
+        ext_modules=[Extension("pearl_gemm_cuda", sources=[])],
         cmdclass={
             "bdist_wheel": CachedWheelsCommand,
             "build_ext": PearlBuildExtension,
