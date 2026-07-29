@@ -550,7 +550,7 @@ def _build_ext_modules():
             },
             extra_link_args=[f"-Wl,-rpath,{torch_lib_path}", "-Wl,-rpath,$ORIGIN"],
             include_dirs=include_dirs,
-            libraries=["cuda"],
+            libraries=["cuda", "curand"],
         )
     ]
 
