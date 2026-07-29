@@ -3,6 +3,46 @@
 #include <cassert>
 #include <cmath>
 
+// Forward declarations — kernels defined in gpu_stark_kernels.cu
+namespace pearl {
+namespace stark {
+
+__global__ void lde_eval_kernel(
+    const uint32_t* __restrict__ coeffs,
+    const uint32_t* __restrict__ eval_points,
+    uint32_t* __restrict__ evaluations,
+    int num_coeffs,
+    int num_points,
+    int poly_degree);
+
+__global__ void batch_lde_eval_kernel(
+    const uint32_t* __restrict__ coeffs,
+    const uint32_t* __restrict__ eval_points,
+    uint32_t* __restrict__ evaluations,
+    int num_polys,
+    int num_points,
+    int poly_degree);
+
+__global__ void fri_fold_kernel(
+    const uint32_t* __restrict__ layer,
+    uint32_t* __restrict__ folded_layer,
+    const uint32_t* __restrict__ challenges,
+    int layer_size);
+
+__global__ void merkle_hash_kernel(
+    const uint32_t* __restrict__ leaves,
+    uint32_t* __restrict__ nodes,
+    int num_leaves,
+    int level);
+
+__global__ void init_roots_of_unity_kernel(
+    uint32_t* __restrict__ roots,
+    uint32_t primitive_root,
+    int num_roots);
+
+} // namespace stark
+} // namespace pearl
+
 namespace pearl {
 namespace stark {
 
