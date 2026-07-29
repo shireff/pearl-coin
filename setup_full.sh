@@ -142,7 +142,7 @@ generate_zk_pow_cache() {
 build_zk_pow_go_bindings() {
     info "Building zk-pow Go bindings..."
     cd "$REPO_ROOT/zk-pow/bindings/go"
-    cargo build --release
+    cargo build --release --no-default-features
 }
 
 build_go_binaries() {
@@ -158,10 +158,36 @@ build_go_binaries() {
     touch "$BIN_DIR/sample-pearld.conf"
 }
 
+build_pearl_gemm() {
+    info "Building pearl-gemm CUDA extension..."
+    local gemm_dir="$REPO_ROOT/miner/pearl-gemm"
+    if [ ! -f "$gemm_dir/setup.py" ]; then
+        info "pearl-gemm/setup.py not found, skipping CUDA build"
+        return
+    fi
+    export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.4}"
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+    export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
+    export PEARL_GEMM_ARCH="${PEARL_GEMM_ARCH:-arch=compute_89,code=sm_89}"
+    export MAX_JOBS="${MAX_JOBS:-4}"
+    export NVCC_PREPEND_FLAGS=""
+    export CUDAHOSTCXX=/usr/bin/g++
+    export CXX=/usr/bin/g++
+    export CC=/usr/bin/gcc
+    cd "$gemm_dir"
+    rm -rf build src/*.so 2>/dev/null || true
+    python3 setup.py build_ext --inplace
+    info "pearl-gemm build complete"
+}
+
 install_python_workspace() {
     info "Syncing Python workspace with uv..."
     cd "$REPO_ROOT"
-    uv sync --all-packages
+    # pearl-gemm is built separately via build.sh — exclude it from uv sync
+    # to avoid re-downloading torch in a temp dir (causes disk-space failures)
+    uv sync --all-packages --no-install-package pearl-gemm || \
+        uv sync --package vllm-miner --no-install-package pearl-gemm
 }
 
 main() {
@@ -175,6 +201,7 @@ main() {
     generate_zk_pow_cache
     build_zk_pow_go_bindings
     build_go_binaries
+    build_pearl_gemm
     install_python_workspace
 
     info "Setup complete."
