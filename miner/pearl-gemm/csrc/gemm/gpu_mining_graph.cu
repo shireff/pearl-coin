@@ -30,20 +30,22 @@ cudaError_t create_mining_graph(MiningGraphState* state, uint32_t num_candidates
     const int hash_blocks = (num_candidates * num_combos + hash_threads - 1) / hash_threads;
 
     MiningJob dummy_jobs[1] = {};
-    uint32_t dummy_jackpots[1] = {};
+    MiningResult dummy_results[1] = {};
     uint32_t dummy_keys[8] = {};
     uint32_t dummy_hashes[1] = {};
 
-    gpu_mining_kernel<<<grid, block, shared_mem_bytes, state->stream>>>(
+    launch_gpu_mining(
         nullptr, nullptr, nullptr, nullptr,
-        dummy_jobs, dummy_jackpots,
-        num_candidates, 1, 1, tile_h, tile_w,
-        m, n, k, rank
+        dummy_jobs, dummy_results,
+        num_candidates, tile_h, tile_w,
+        state->stream
     );
 
-    gpu_jackpot_hash_kernel<<<hash_blocks, hash_threads, 0, state->stream>>>(
-        dummy_jackpots, dummy_keys, dummy_hashes,
-        num_candidates, 1
+    launch_gpu_jackpot_hash(
+        reinterpret_cast<const uint32_t*>(dummy_results),
+        dummy_keys, dummy_hashes,
+        num_candidates, 1,
+        state->stream
     );
 
     err = cudaStreamEndCapture(state->stream, &state->graph);
@@ -91,20 +93,22 @@ cudaError_t update_mining_graph(MiningGraphState* state, uint32_t num_candidates
     const int hash_blocks = (num_candidates * num_combos + hash_threads - 1) / hash_threads;
 
     MiningJob dummy_jobs[1] = {};
-    uint32_t dummy_jackpots[1] = {};
+    MiningResult dummy_results[1] = {};
     uint32_t dummy_keys[8] = {};
     uint32_t dummy_hashes[1] = {};
 
-    gpu_mining_kernel<<<grid, block, shared_mem_bytes, state->stream>>>(
+    launch_gpu_mining(
         nullptr, nullptr, nullptr, nullptr,
-        dummy_jobs, dummy_jackpots,
-        num_candidates, 1, 1, tile_h, tile_w,
-        m, n, k, rank
+        dummy_jobs, dummy_results,
+        num_candidates, tile_h, tile_w,
+        state->stream
     );
 
-    gpu_jackpot_hash_kernel<<<hash_blocks, hash_threads, 0, state->stream>>>(
-        dummy_jackpots, dummy_keys, dummy_hashes,
-        num_candidates, 1
+    launch_gpu_jackpot_hash(
+        reinterpret_cast<const uint32_t*>(dummy_results),
+        dummy_keys, dummy_hashes,
+        num_candidates, 1,
+        state->stream
     );
 
     err = cudaStreamEndCapture(state->stream, &new_graph);
@@ -118,7 +122,8 @@ cudaError_t update_mining_graph(MiningGraphState* state, uint32_t num_candidates
     }
 
     cudaGraphExecUpdateResult update_result;
-    err = cudaGraphExecUpdate(state->graph_exec, new_graph, &update_result);
+    cudaGraphNode_t error_node = nullptr;
+    err = cudaGraphExecUpdate(state->graph_exec, new_graph, &error_node, &update_result);
     if (err == cudaSuccess && update_result == cudaGraphExecUpdateSuccess) {
         cudaGraphExecDestroy(new_exec);
         cudaGraphDestroy(new_graph);
