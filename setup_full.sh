@@ -41,21 +41,19 @@ detect_linux_arch() {
 install_system_packages() {
     info "Installing required system packages..."
     if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update
+        sudo apt-get update -qq
 
-        local python_distutils_pkg=""
-        if apt-cache show python3-distutils >/dev/null 2>&1; then
-            python_distutils_pkg="python3-distutils"
-        elif apt-cache show python3.12-distutils >/dev/null 2>&1; then
-            python_distutils_pkg="python3.12-distutils"
-        else
-            python_distutils_pkg="python3-setuptools"
-        fi
-
+        # Install base packages first (always available)
         sudo apt-get install -y \
             git curl build-essential pkg-config libssl-dev clang lld tmux \
-            python3 python3-pip python3-venv python3-dev "$python_distutils_pkg" ninja-build \
-            unzip
+            python3 python3-pip python3-venv python3-dev ninja-build unzip
+
+        # Install distutils/setuptools — try each option, skip on failure
+        for pkg in python3-distutils python3.12-distutils python3-setuptools; do
+            if apt-cache show "$pkg" >/dev/null 2>&1; then
+                sudo apt-get install -y "$pkg" && break || true
+            fi
+        done
     else
         die "unsupported package manager: apt-get is required on this system"
     fi
@@ -83,18 +81,14 @@ install_rust() {
 }
 
 install_go() {
-    local go_arch
-    go_arch="$(detect_linux_arch)"
-    local current_go
     if command -v go >/dev/null 2>&1; then
-        current_go="$(go version | awk '{print $3}' | sed 's/^go//')"
-        if [ "$current_go" = "$GO_VERSION" ]; then
-            info "Go $GO_VERSION is already installed"
-            return
-        fi
-        info "Replacing installed Go version $current_go with $GO_VERSION"
+        info "Go is already installed: $(go version)"
+        export PATH="/usr/local/go/bin:$PATH"
+        return
     fi
 
+    local go_arch
+    go_arch="$(detect_linux_arch)"
     local go_tarball="go${GO_VERSION}.linux-${go_arch}.tar.gz"
     local go_url="https://go.dev/dl/${go_tarball}"
     local tmp_file
@@ -165,7 +159,17 @@ build_pearl_gemm() {
         info "pearl-gemm/setup.py not found, skipping CUDA build"
         return
     fi
-    export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.4}"
+    # Auto-detect CUDA installation
+    if [ -z "${CUDA_HOME:-}" ]; then
+        for cuda_candidate in /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda; do
+            if [ -f "$cuda_candidate/bin/nvcc" ]; then
+                CUDA_HOME="$cuda_candidate"
+                break
+            fi
+        done
+        CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+    fi
+    export CUDA_HOME
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
     export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
