@@ -5,8 +5,8 @@ import threading
 import time
 import traceback
 
-CLONE_DIR = os.path.expanduser("~/pearl")
-DATA_DIR = os.path.expanduser("~/.pearl")
+CLONE_DIR = os.path.expanduser("~/pearl-cion")
+DATA_DIR = os.path.expanduser("~/.pearl-cion")
 MODEL_NAME = "pearl-ai/Llama-3.2-1B-Instruct-pearl"
 
 TILE_SIZE_M = 256
@@ -99,10 +99,10 @@ def run_mining():
         threading.Thread(target=_stream_logs, args=("pearld", pearld_proc), daemon=True).start()
         time.sleep(3)
 
-        # Start pearl-gateway
+        # Start pearl-gateway using the current Python interpreter
         print("[2/4] Starting pearl-gateway...")
         gateway_proc = subprocess.Popen(
-            [f"{CLONE_DIR}/.venv/bin/python", "-m", "pearl_gateway"],
+            [sys.executable, "-m", "pearl_gateway"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         threading.Thread(target=_stream_logs, args=("gateway", gateway_proc), daemon=True).start()
@@ -124,10 +124,10 @@ def run_mining():
                 gateway_proc.terminate()
                 gateway_proc = None
 
-        # Start vllm serve
+        # Start vllm serve using the current Python interpreter
         print("[3/4] Starting vllm serve with Pearl mining plugin...")
         vllm_proc = subprocess.Popen(
-            [f"{CLONE_DIR}/.venv/bin/vllm", "serve", MODEL_NAME,
+            [sys.executable, "-m", "vllm", "serve", MODEL_NAME,
              "--host", "0.0.0.0", "--port", "8000",
              "--max-model-len", "2048",
              "--gpu-memory-utilization", "0.9",
