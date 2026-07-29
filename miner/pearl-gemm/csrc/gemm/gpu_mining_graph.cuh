@@ -6,34 +6,6 @@
 namespace pearl {
 namespace mining {
 
-extern "C" __global__ void gpu_mining_kernel(
-    const int32_t* __restrict__ d_a_noised,
-    const int32_t* __restrict__ d_b_noised_t,
-    const int32_t* __restrict__ d_a_rows_data,
-    const int32_t* __restrict__ d_b_cols_data,
-    const MiningJob* __restrict__ d_jobs,
-    uint32_t* __restrict__ d_jackpots,
-    uint32_t* __restrict__ d_hashes,
-    uint8_t* __restrict__ d_winner_flags,
-    uint32_t num_candidates,
-    uint32_t P,
-    uint32_t Q,
-    uint32_t tile_h,
-    uint32_t tile_w,
-    uint32_t m,
-    uint32_t n,
-    uint32_t k,
-    uint32_t rank
-);
-
-extern "C" __global__ void gpu_jackpot_hash_kernel(
-    const uint32_t* __restrict__ d_jackpots,
-    const uint32_t* __restrict__ d_keys,
-    uint32_t* __restrict__ d_hashes,
-    uint32_t num_candidates,
-    uint32_t num_combos
-);
-
 // CUDA Graph handle for batch mining
 struct MiningGraphState {
     cudaGraph_t graph;
