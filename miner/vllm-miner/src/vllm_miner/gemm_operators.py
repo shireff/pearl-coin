@@ -372,6 +372,7 @@ def pearl_gemm_noisy(
         tile_size_m=config.settings.tile_size_m,
         tile_size_n=config.settings.tile_size_n,
         tile_size_k=config.settings.tile_size_k,
+        pipeline_stages=4,
         cluster_size_m=2,
         cluster_size_n=2,
         run_noising_A=True,

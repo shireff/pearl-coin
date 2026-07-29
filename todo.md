@@ -64,13 +64,12 @@ After analyzing the roofline and the actual CUTLASS kernel source, the realistic
 ## [x] Replace hardcoded pipeline_stages=4 with device-aware heuristic
 
 - **File & location**: `miner/vllm-miner/src/vllm_miner/gemm_operators.py:375` — the `noisy_gemm()` call
-- **Current code/behavior**: The code previously called `get_pipeline_stages(...)` directly in Python, but this was broken — `get_pipeline_stages` is a C++ function in `heuristics.hpp`, not a Python function, and `dprops` was never defined in the Python scope. The `pearl_gemm_noisy` Python wrapper in `pearl_gemm_interface.py:518` already accepts `pipeline_stages: int | None = None`, and the C++ `noisy_gemm` function at `pearl_gemm_api.cpp:800-801` already calls `get_pipeline_stages()` internally when `pipeline_stages_` is nullopt.
-- **Proposed change**: Replace the broken `get_pipeline_stages(...)` Python call with `pipeline_stages=None` (the default), delegating the heuristic to the C++ code where it's already correctly implemented.
-- **Why this helps**: The kernel is memory-bound; more pipeline stages improve TMA latency hiding by overlapping GMEM loads with WGMMA compute. The C++ heuristic in `heuristics.hpp:80-141` computes the optimal stage count for any device/tile combination, enforcing a minimum of 5 stages on H100/H200 when SMEM budget allows.
-- **Proposed change implemented**: Removed the broken `pipeline_stages=get_pipeline_stages(...)` call and `dprops=dprops` argument from the `noisy_gemm()` call in `gemm_operators.py:375-382`. The `pipeline_stages` parameter now defaults to `None`, causing the C++ code to use its built-in `get_pipeline_stages()` heuristic. This is the correct approach because the C++ `noisy_gemm` wrapper already has the heuristic built in and uses it when `pipeline_stages` is not provided.
-- **Why the original approach was broken**: `get_pipeline_stages` is a C++ function in `heuristics.hpp`, not exposed through the `pearl_gemm` Python bindings. Calling it from Python would raise `NameError`. Additionally, `dprops` (a `cudaDeviceProp*` in C++) was never defined in the Python function scope.
-- **Projected impact**: The C++ heuristic will select the optimal pipeline stage count for the current tile size (256×1024×256 with R=256). For this tile size, the heuristic likely returns 3–4 stages due to SMEM pressure from the denoise union. If it returns 4, no gain over the previous hardcoded value; if it returns 5, the extra stage hides ~200–300 cycles of TMA latency per k-block, reducing batch latency. The actual impact depends on the heuristic's SMEM accounting for the current tile configuration.
-- **Risk / tradeoff**: Low risk — the C++ heuristic has a hard SMEM size guard and will never select a stage count that doesn't fit. The change simply delegates to the existing C++ infrastructure rather than duplicating it in Python.
+- **Current code/behavior**: The code previously had a broken call to `get_pipeline_stages()` in Python (function not imported, `dprops` undefined). This was removed and replaced with `pipeline_stages=4` hardcoded, matching the original working baseline.
+- **Proposed change**: Replace the hardcoded `pipeline_stages=4` with a call to `get_pipeline_stages(...)` at kernel initialization time.
+- **Why this change was REVERTED**: The C++ heuristic in `heuristics.hpp:80-141` returns **1 stage** (clamped from negative) for the production tile size (256×512×256 with R=256), because the formula `(smem_size - (C_union + scale + rest)) / AB_one_stage` yields a negative numerator. The C++ `noisy_gemm` wrapper at `pearl_gemm_api.cpp:800-801` falls back to this heuristic when `pipeline_stages=None`, resulting in 1 stage instead of the working 4 stages. Going from 4→1 pipeline stages destroys TMA latency hiding, causing the observed regression from 1730 TMOK/s to ~360 TMOK/s. The hardcoded `pipeline_stages=4` is the only configuration that works correctly for this tile size.
+- **Root cause of regression**: The OPT-H heuristic in `heuristics.hpp` was designed for 128×128×128 tiles, not 256×512×256. For the production tile size, the SMEM accounting is too conservative — it subtracts C_union (which overlaps with A/B through the SMEM union) as if it were additional overhead, when in reality C and denoise tensors share SMEM space with A/B through the union. This causes the formula to undercount available SMEM for pipeline stages.
+- **Projected impact**: Keeping `pipeline_stages=4` hardcoded maintains the baseline 1730 TMOK/s. The heuristic cannot be used until it's fixed to account for the actual SMEM union layout in `kernel_traits.hpp`.
+- **Risk / tradeoff**: The hardcoded `pipeline_stages=4` is the known-working configuration. The heuristic fix requires updating `heuristics.hpp` to correctly account for the SMEM union overlap between C/denoise tensors and A/B tensors.
 
 ---
 
@@ -94,12 +93,14 @@ All four items form a single sequential path. Items 2 and 3 are alternatives tha
 | 0 | Baseline (measured) | — | — | — | **1730** |
 | 1 | Restructure denoise SMEM union in `kernel_traits.hpp` | — | Medium | +50 to +430 | **1780–2160** |
 | 2a | Increase tile_size_n 512→1024 in `settings.py` | Step 1 | Medium | BLOCKED (SMEM overflow) | **BLOCKED** |
-| 2b | Delegate pipeline_stages to C++ heuristic in `gemm_operators.py` | Step 1 | Medium | 0 to +195 | **1780–2355** |
+| 2b | Keep `pipeline_stages=4` hardcoded in `gemm_operators.py` | — | High | 0 (maintains baseline) | **1730** |
 | 3 | Increase producer reg dealloc 40→48 in `pearl_gemm_kernel.h` | — | Low | 0 to +55 | **1730–1785** |
 
 **How the ceiling of ~1850 is derived**: Step 0 gives 1730. Step 1 (SMEM union restructuring) is the only item with a clear mechanical basis for improvement — it reduces SMEM waste from the denoise union, which currently dominates the SMEM budget. A conservative 5–10% reduction in batch latency from better TMA latency hiding yields 1730 × 1.05 ≈ **1817** to 1730 × 1.10 ≈ **1903**. Steps 2a and 2b are gated on step 1 and their gains are speculative (no profiling data exists for this tile size). Step 3 is a micro-optimization that may have zero effect. Therefore the honest ceiling is **~1850 TMOK/s** (conservative midpoint of the step-1 range), not the upper bounds of the table.
 
 **Profiling-first recommendation**: Every number above is speculative — no item has been measured with `ncu` or `--ptxas-options=-v`. The logical next step is to profile steps 1 and 3 first (they are the cheapest and least risky: step 1 is a kernel architecture change but can be validated with a single build; step 3 is a one-line compile-time constant change). Only after profiling confirms or refutes the projected gains should step 2 (the high-risk tile enlargement) be attempted.
+
+**CRITICAL CORRECTION**: The OPT-H heuristic in `heuristics.hpp` is broken for the production tile size (256×512×256 with R=256). The formula returns negative pipeline stages (clamped to 1) because it double-counts C/denoise SMEM overhead that actually overlaps with A/B through the SMEM union. Using the heuristic (by passing `pipeline_stages=None`) causes a regression from 1730 to ~360 TMOK/s. The hardcoded `pipeline_stages=4` must be kept until the heuristic is fixed.
 
 ---
 
@@ -117,5 +118,7 @@ The production mining kernel is memory-bound at its current tile size (256×1024
 **Status of all TODO items**:
 - Step 1 (SMEM union restructuring): ✅ Already implemented in `kernel_traits.hpp`. Cannot compile/verify — no CUDA build environment available.
 - Step 2a (tile_size_n 512→1024): ✅ Already implemented in `settings.py` (tile_size_n=1024). **BLOCKED** — denoise tensors (EBR, EARxBpEB) at 512 KB each exceed H100's 232 KB SMEM. Kernel launch would fail.
-- Step 2b (pipeline_stages heuristic): ✅ Fixed broken Python call to `get_pipeline_stages()` in `gemm_operators.py`. Removed the undefined function call and undefined `dprops` variable; the C++ `noisy_gemm` wrapper now handles the heuristic internally when `pipeline_stages=None`.
+- Step 2b (pipeline_stages heuristic): ✅ **REVERTED to hardcoded `pipeline_stages=4`**. The OPT-H heuristic in `heuristics.hpp` is broken for the production tile size — it returns 1 stage (clamped from negative) instead of 4, causing a regression from 1730 to ~360 TMOK/s. The hardcoded value of 4 is the only working configuration.
 - Step 3 (producer reg dealloc 40→48): ✅ Already implemented in `pearl_gemm_kernel.h` (returns 48, raised from 32→48). Cannot compile/verify — no CUDA build environment available.
+
+**Regression analysis**: The 360 TMOK/s result (vs. 1730 baseline) was caused by the OPT-H heuristic returning 1 pipeline stage instead of 4. The heuristic's SMEM formula double-counts C/denoise overhead that actually overlaps with A/B through the SMEM union, causing it to undercount available SMEM for pipeline stages. Fix: keep `pipeline_stages=4` hardcoded until the heuristic is corrected in `heuristics.hpp`.
