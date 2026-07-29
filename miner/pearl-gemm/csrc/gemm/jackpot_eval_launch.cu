@@ -2,6 +2,31 @@
 #include <cuda_runtime.h>
 #include <cassert>
 
+__global__ void evaluate_tile_kernel(
+    const int32_t* __restrict__ a_noised,
+    const int32_t* __restrict__ b_noised_t,
+    const int32_t* __restrict__ a_rows,
+    const int32_t* __restrict__ b_cols,
+    int m, int n, int k, int rank,
+    int tile_h, int tile_w,
+    uint32_t* __restrict__ jackpot_tile,
+    uint32_t* __restrict__ jackpot);
+
+__global__ void accumulate_jackpot_kernel(
+    const uint32_t* __restrict__ jackpot_tile,
+    int tile_h, int tile_w,
+    uint32_t* __restrict__ jackpot,
+    int rank_idx, int num_ranks);
+
+__global__ void fused_evaluate_accumulate_kernel(
+    const int32_t* __restrict__ a_noised,
+    const int32_t* __restrict__ b_noised_t,
+    const int32_t* __restrict__ a_rows,
+    const int32_t* __restrict__ b_cols,
+    int m, int n, int k, int rank,
+    int tile_h, int tile_w,
+    uint32_t* __restrict__ jackpot);
+
 namespace pearl {
 namespace jackpot {
 
