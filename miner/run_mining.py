@@ -63,7 +63,8 @@ def _print_gpu_snapshot():
     props = torch.cuda.get_device_properties(device)
     mem = torch.cuda.memory_stats(device)
     print(f"GPU Snapshot: {props.name} ({props.total_memory // (1024 * 1024)} MB)")
-    print(f"  SMs: {props.multi_processor_count}  |  Clock: {props.clock_rate // 1000} MHz")
+    clock_mhz = getattr(props, 'clock_rate', 0) // 1000 or getattr(props, 'max_clock_rate', 0) // 1000
+    print(f"  SMs: {props.multi_processor_count}  |  Clock: {clock_mhz} MHz")
     print(f"  Allocated: {mem.get('allocated_bytes.all.current', 0) / (1024 * 1024):.1f} MB  |  "
           f"Reserved: {mem.get('reserved_bytes.all.current', 0) / (1024 * 1024):.1f} MB")
     print(f"  Active Allocations: {mem.get('allocation.all.current', 'N/A')}  |  "
