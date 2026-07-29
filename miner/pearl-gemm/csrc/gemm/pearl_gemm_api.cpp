@@ -26,6 +26,7 @@
 using pearl::jackpot::JACKPOT_SIZE;
 #include "persistent_mining.cuh"
 #include "gpu_mining_kernel.cuh"
+#include "gpu_mining_graph.cuh"
 #include "../stark/gpu_stark_kernels.cuh"
 
 #include <optional>
@@ -1371,22 +1372,12 @@ at::Tensor gpu_generate_and_mine_batch(
   auto d_a_raw = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(m), static_cast<int64_t>(k)}, options);
   auto d_b_raw_t = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(n), static_cast<int64_t>(k)}, options);
 
-  options = a_rows_data.options().dtype(torch::kInt32);
-  auto d_a_noised = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(m), static_cast<int64_t>(k)}, options);
-  auto d_b_noised_t = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(n), static_cast<int64_t>(k)}, options);
-
-  options = a_rows_data.options().dtype(torch::kUInt32);
-  auto d_a_noise_seed = torch::empty({static_cast<int64_t>(batch_size), 8}, options);
-
   // Launch candidate generation kernel on GPU
   pearl::mining::launch_gpu_candidate_generation(
       d_a_raw.data_ptr<int8_t>(),
       d_b_raw_t.data_ptr<int8_t>(),
-      d_a_noised.data_ptr<int32_t>(),
-      d_b_noised_t.data_ptr<int32_t>(),
-      d_a_noise_seed.data_ptr<uint32_t>(),
       batch_size_u,
-      m, n, k, rank,
+      m, n, k,
       base_seed,
       stream);
 
@@ -1395,16 +1386,25 @@ at::Tensor gpu_generate_and_mine_batch(
       TORCH_CHECK(false, "Candidate generation kernel launch failed: ", cudaGetErrorString(err));
   }
 
+  // Allocate int32 noised buffers and output buffers for mining kernel
+  auto noised_opts = a_rows_data.options().dtype(torch::kInt32);
+  auto d_a_noised_out = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(m), static_cast<int64_t>(k)}, noised_opts);
+  auto d_b_noised_t_out = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(n), static_cast<int64_t>(k)}, noised_opts);
+  auto hashes = torch::empty({num_jobs, num_combos, 8}, a_rows_data.options().dtype(torch::kUInt32));
+  auto winner_flags = torch::empty({static_cast<int64_t>(num_jobs * num_combos + 7) / 8}, a_rows_data.options().dtype(torch::kUInt8));
+
   // Launch mining kernel with GPU-generated device pointers
-  auto jackpots = torch::empty({num_jobs, num_combos, JACKPOT_SIZE}, d_a_noised.options().dtype(torch::kUInt32));
+  auto jackpots = torch::empty({num_jobs, num_combos, JACKPOT_SIZE}, a_rows_data.options().dtype(torch::kUInt32));
 
   pearl::mining::launch_gpu_mining(
-      d_a_noised.data_ptr<int32_t>(),
-      d_b_noised_t.data_ptr<int32_t>(),
+      d_a_noised_out.data_ptr<int32_t>(),
+      d_b_noised_t_out.data_ptr<int32_t>(),
       a_rows_data.data_ptr<int32_t>(),
       b_cols_data.data_ptr<int32_t>(),
       reinterpret_cast<pearl::mining::MiningJob*>(jobs.data_ptr()),
       jackpots.data_ptr<uint32_t>(),
+      hashes.data_ptr<uint32_t>(),
+      winner_flags.data_ptr<uint8_t>(),
       static_cast<uint32_t>(num_jobs),
       static_cast<uint32_t>(P),
       static_cast<uint32_t>(Q),
