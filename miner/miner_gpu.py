@@ -474,35 +474,73 @@ def main():
         smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
         logger.info(f"Session ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB  num_jobs={num_jobs}  P={session.P}  Q={session.Q}  combos={session.P*session.Q}")
 
+        import queue as _queue
+        # ── Prefetch queue: background thread fetches next job while GPU runs ──
+        _job_queue: _queue.Queue = _queue.Queue(maxsize=2)
+        _stop_prefetch = threading.Event()
+
+        def _prefetch_worker():
+            while not _stop_prefetch.is_set():
+                try:
+                    job = client.get_mining_info()
+                    _job_queue.put(job, timeout=1.0)
+                except BrokenPipeError:
+                    logger.warning("Prefetch: gateway connection lost — reconnecting in 3s...")
+                    time.sleep(3)
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    try:
+                        client = MiningClient(rpc_config)
+                        logger.info("Prefetch: reconnected to gateway")
+                    except Exception as e:
+                        logger.error(f"Prefetch: reconnect failed: {e}")
+                        time.sleep(5)
+                except Exception as e:
+                    logger.debug(f"Prefetch error: {e}")
+                    time.sleep(0.01)
+
+        prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
+        prefetch_thread.start()
+        logger.info("Job prefetch thread started")
+
+        round_count = 0
+        total_elapsed = 0.0
+
         while True:
             try:
-                mining_job: MiningJob = client.get_mining_info()
+                # Get pre-fetched job (GPU is idle only if queue is empty)
+                mining_job: MiningJob = _job_queue.get(timeout=5.0)
+
                 won = session.run_round(mining_job)
+
                 # Sync CUDA events to get accurate GPU kernel time
                 session._t_end.synchronize()
                 elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0  # ms → s
                 # tmok = nonces per round = tile_h × tile_w × P × Q / rank / 1000
                 tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                 tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
-                logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
+
+                round_count += 1
+                total_elapsed += elapsed
+                # Log every 100 rounds to reduce I/O overhead
+                if round_count % 100 == 0:
+                    avg_tmok = tmok / (total_elapsed / round_count) if total_elapsed > 0 else 0
+                    logger.info(f"[round {round_count}] avg GPU time: {total_elapsed/round_count*1000:.1f}ms, avg tmok/s={avg_tmok:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
+                    total_elapsed = 0.0
+                    round_count = 0
+
                 if won:
                     plain_proof = session.build_proof(mining_job)
                     client.submit_plain_proof(plain_proof, mining_job)
                     logger.info("Block found and submitted!")
+
+            except _queue.Empty:
+                logger.warning("Job queue empty — waiting for gateway...")
             except KeyboardInterrupt:
+                _stop_prefetch.set()
                 raise
-            except BrokenPipeError:
-                logger.warning("Gateway connection lost — reconnecting in 3s...")
-                time.sleep(3)
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                try:
-                    client = MiningClient(rpc_config)
-                    logger.info("Reconnected to gateway")
-                except Exception as e:
-                    logger.error(f"Reconnect failed: {e}")
             except Exception as exc:
                 import traceback as _tb
                 tb = _tb.extract_tb(exc.__traceback__)
