@@ -156,6 +156,8 @@ def run_single_mining_round(
     EAR_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
     EBL_R_major  = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
     EBL_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
+    key_A        = torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda")
+    key_B        = torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda")
 
     # ── Generate noise on GPU ────────────────────────────────────────────────
     kernel_start = time.time()
@@ -170,6 +172,8 @@ def run_single_mining_round(
         EBL_K_major=EBL_K_major,
         EBR=EBR,
         EBR_fp16=EBR_fp16,
+        key_A=key_A,
+        key_B=key_B,
     )
 
     # ── Allocate noised A / B matrices ───────────────────────────────────────
