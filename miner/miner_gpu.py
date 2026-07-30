@@ -211,12 +211,10 @@ class MiningGraphSession:
         self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
         self.hashes     = torch.empty((num_jobs, self.num_combos, 8), dtype=torch.uint32, device="cuda")
 
-        smem = estimate_shared_mem_bytes(tile_h, tile_w, rank)
-        self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank, smem)
+        self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank)
         if self.graph_state is None:
             raise RuntimeError(
-                f"create_mining_graph failed for tile=({tile_h},{tile_w}) smem={smem} bytes — "
-                f"try smaller tile size"
+                f"create_mining_graph failed for tile=({tile_h},{tile_w}) — try smaller tile size"
             )
 
     def run_round(self, mining_job: MiningJob) -> bool:
@@ -292,9 +290,9 @@ def main():
             if not args.gateway_tcp:
                 threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
                 if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30, logger=logger):
-                    logger.error("Gateway socket %s never appeared", socket_path)
+                logger.error(f"Gateway socket {socket_path} never appeared")
                     return 1
-                logger.info("Gateway socket ready: %s", socket_path)
+                logger.info(f"Gateway socket ready: {socket_path}")
             else:
                 threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
                 time.sleep(2)
@@ -311,12 +309,11 @@ def main():
         tile_m, tile_n = choose_safe_tile_size(args.tile_m, args.tile_n, args.noise_rank, shared_mem_limit)
         if (tile_m, tile_n) != (args.tile_m, args.tile_n):
             logger.warning(
-                "Tile (%s,%s) exceeds GPU shared memory (%d KB) — using (%s,%s)",
-                args.tile_m, args.tile_n, shared_mem_limit // 1024, tile_m, tile_n,
+                f"Tile ({args.tile_m},{args.tile_n}) exceeds GPU shared memory ({shared_mem_limit // 1024} KB) — using ({tile_m},{tile_n})"
             )
 
-        logger.info("GPU: %s  shared_mem_limit=%d KB", gpu_name or "unknown", shared_mem_limit // 1024)
-        logger.info("tile=(%d,%d)  rank=%d  noise_range=%d", tile_m, tile_n, args.noise_rank, args.noise_range)
+        logger.info(f"GPU: {gpu_name or 'unknown'}  shared_mem_limit={shared_mem_limit // 1024} KB")
+        logger.info(f"tile=({tile_m},{tile_n})  rank={args.noise_rank}  noise_range={args.noise_range}")
 
         settings = MinerSettings(
             noise_range=args.noise_range,
@@ -330,7 +327,7 @@ def main():
         logger.info("Initialising CUDA Graph session...")
         session = MiningGraphSession(settings, num_jobs=1, P=1, Q=1)
         smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
-        logger.info("CUDA Graph ready — tile=(%d,%d)  smem=%d KB", session.tile_h, session.tile_w, smem_kb)
+        logger.info(f"CUDA Graph ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB")
 
         while True:
             try:
