@@ -291,20 +291,15 @@ def run_single_mining_round(
     hashes = torch.empty((num_candidates, num_combos, 8), dtype=torch.uint32, device="cuda")
 
     try:
-        params = inspect.signature(gpu_jackpot_hash).parameters
-    except (ValueError, TypeError):
         hashes = gpu_jackpot_hash(jackpots, keys)
-    else:
-        if len(params) == 2:
-            hashes = gpu_jackpot_hash(jackpots, keys)
-        else:
-            gpu_jackpot_hash(
-                jackpots,
-                keys,
-                hashes,
-                int(num_candidates),
-                int(num_combos),
-            )
+    except TypeError:
+        gpu_jackpot_hash(
+            jackpots,
+            keys,
+            hashes,
+            int(num_candidates),
+            int(num_combos),
+        )
 
     elapsed = time.time() - kernel_start
     tmok    = (tile_h * tile_w) / rank / 1000.0
