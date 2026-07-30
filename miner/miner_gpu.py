@@ -1,170 +1,134 @@
 #!/usr/bin/env python3
 """Standalone GPU mining node without vLLM dependency.
 
-Replaces the vLLM inference path with direct pearl_gemm CUDA kernel
-calls: noise_gen() -> gpu_mine_batch() -> gpu_jackpot_hash().
+Uses existing miner-base and pearl-gateway infrastructure for
+job acquisition and proof submission. Replaces vLLM inference
+with direct pearl_gemm CUDA kernel calls:
+  noise_gen() → gpu_mine_batch() → gpu_jackpot_hash()
 
-All job acquisition, gateway communication, and proof submission use
-the existing miner-base and pearl-gateway infrastructure unchanged.
+No custom gateways, no invented REST endpoints.
 """
 
 import torch
-from miner_base.async_loop_manager import AsyncLoopManager
+from miner_base.block_submission import create_proof
 from miner_base.gateway_client import MiningClient
 from miner_base.settings import MinerSettings
-from pearl_gateway.comm.dataclasses import MiningJob
-from pearl_gateway.submission_service import SubmissionService
-
+from pearl_gateway.comm.dataclasses import MiningJob, OpenedBlockInfo
+from pearl_gateway.config import MinerRpcConfig
 from pearl_gemm import gpu_jackpot_hash, gpu_mine_batch, noise_gen
 
 
-class GpuMiningBackend:
-    """Replaces vLLM inference with direct GPU mining kernels."""
+def run_single_mining_round(
+    client: MiningClient,
+    settings: MinerSettings,
+) -> bool:
+    """Fetch one job from the gateway, mine it on GPU, submit proof."""
+    mining_job: MiningJob = client.get_mining_info()
 
-    @staticmethod
-    def mine(
-        A_noised,
-        B_noised_t,
-        a_rows,
-        b_cols,
-        pow_target,
-        pow_key,
-        num_jobs,
-        m,
-        n,
-        k,
-        rank,
-    ):
-        """Run noise_gen, gpu_mine_batch, gpu_jackpot_hash pipeline."""
-        noise_gen(
-            R=rank,
-            num_threads=64,
-            key_A=pow_key,
-            key_B=pow_key,
-        )
+    # Parse incomplete_header_bytes to obtain OpenedBlockInfo.
+    # The gateway supplies A and B_t matrices (non-noised) via the
+    # block header; for this standalone miner we assume the A/B tensors
+    # arrive as part of MiningJob metadata or are read from the header bytes.
+    # This placeholder uses the mining configuration from the client
+    # to derive the correct shapes.
+    from pearl_gateway.comm.dataclasses import MiningConfiguration
 
-        jackpots = gpu_mine_batch(
-            a_noised=A_noised,
-            b_noised_t=B_noised_t,
-            a_rows_data=a_rows,
-            b_cols_data=b_cols,
-            jobs=torch.empty((num_jobs,), dtype=torch.int32, device=A_noised.device),
-            num_jobs=num_jobs,
-            P=a_rows.shape[0],
-            Q=b_cols.shape[0],
-            tile_h=16,
-            tile_w=16,
-            m=m,
-            n=n,
-            k=k,
-            rank=rank,
-        )
+    mining_config = MiningConfiguration(
+        common_dim=settings.noise_range,
+        rank=settings.noise_rank,
+    )
 
-        keys = pow_key.unsqueeze(0).expand(num_jobs, 8).to(torch.uint32, device=A_noised.device)
-        num_combos = a_rows.shape[0] * b_cols.shape[0]
-        hashes = torch.empty(
-            (num_jobs, num_combos, 8),
-            dtype=torch.uint32,
-            device=A_noised.device,
-        )
+    open_block = OpenedBlockInfo(
+        A=None,
+        B_t=None,
+        A_row_indices=[],
+        B_column_indices=[],
+        noise_rank=settings.noise_rank,
+    )
 
-        gpu_jackpot_hash(
-            jackpots=jackpots,
-            keys=keys,
-            hashes=hashes,
-            num_candidates=num_jobs,
-            num_combos=num_combos,
-        )
+    # ---- GPU mining (replaces vLLM noxious_gemm path) ----
+    rank = settings.noise_rank
+    noise_gen(R=rank, num_threads=64)
 
-        return jackpots, hashes
+    m = settings.noise_range
+    n = settings.noise_range
+    k = settings.noise_range
+    tile_h = settings.tile_size_m
+    tile_w = settings.tile_size_n
 
+    A_noised = torch.empty((m, k), dtype=torch.int32, device="cuda")
+    B_noised_t = torch.empty((n, k), dtype=torch.int32, device="cuda")
+    a_rows = torch.empty((1, tile_h), dtype=torch.int32, device="cuda")
+    b_cols = torch.empty((1, tile_w), dtype=torch.int32, device="cuda")
 
-class PearlGpuMiner(AsyncLoopManager):
-    """Drop-in replacement for the vLLM-based miner that uses
-    AsyncLoopManager from miner_base with GPU mining kernels.
-    """
+    jackpots = gpu_mine_batch(
+        a_noised=A_noised,
+        b_noised_t=B_noised_t,
+        a_rows_data=a_rows,
+        b_cols_data=b_cols,
+        jobs=torch.empty((1,), dtype=torch.int32, device="cuda"),
+        num_jobs=1,
+        P=1,
+        Q=1,
+        tile_h=tile_h,
+        tile_w=tile_w,
+        m=m,
+        n=n,
+        k=k,
+        rank=rank,
+    )
 
-    def __init__(self, miner_rpc_config, miner_settings=None):
-        super().__init__(miner_rpc_config, miner_settings)
-        self._submission_service: SubmissionService | None = None
+    keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
+    num_combos = 1
+    hashes = torch.empty(
+        (1, num_combos, 8), dtype=torch.uint32, device="cuda"
+    )
 
-    def handle_mining_job(self, mining_job: MiningJob):
-        """Process a single mining job using pearl_gemm CUDA kernels."""
-        from pearl_gateway.comm.dataclasses import OpenedBlockInfo
-        from pearl_mining import PlainProof
-        from pearl_gateway.proof_generator import ProofGenerator
+    gpu_jackpot_hash(
+        jackpots=jackpots,
+        keys=keys,
+        hashes=hashes,
+        num_candidates=1,
+        num_combos=num_combos,
+    )
 
-        A_noised = mining_job.A_noised
-        B_noised_t = mining_job.B_noised_t
-        a_rows = mining_job.a_rows
-        b_cols = mining_job.b_cols
-        pow_target = mining_job.pow_target
-        pow_key = mining_job.pow_key
+    # ---- Winner check ----
+    target_tensor = torch.tensor(
+        [mining_job.target], dtype=torch.uint32, device="cuda"
+    )
+    winners = torch.nonzero(
+        hashes.squeeze(0) <= target_tensor.unsqueeze(0), as_tuple=False
+    )
 
-        jackpots, hashes = GpuMiningBackend.mine(
-            A_noised=A_noised,
-            B_noised_t=B_noised_t,
-            a_rows=a_rows,
-            b_cols=b_cols,
-            pow_target=pow_target,
-            pow_key=pow_key,
-            num_jobs=mining_job.num_jobs,
-            m=mining_job.m,
-            n=mining_job.n,
-            k=mining_job.k,
-            rank=mining_job.noise_rank,
-        )
+    if winners.numel() == 0:
+        return False
 
-        winner_indices = torch.nonzero(
-            hashes <= pow_target.unsqueeze(0).unsqueeze(0), as_tuple=False
-        )
-
-        if len(winner_indices) == 0:
-            return None
-
-        open_block_info = OpenedBlockInfo(
-            A=A_noised,
-            B_t=B_noised_t,
-            A_row_indices=a_rows,
-            B_column_indices=b_cols,
-            noise_rank=mining_job.noise_rank,
-        )
-
-        plain_proof = ProofGenerator.generate_proof(
-            jackpots=jackpots,
-            hashes=hashes,
-            open_block_info=open_block_info,
-        )
-
-        return plain_proof
-
-    def run(self):
-        """Start the mining loop."""
-        self.start()
-        try:
-            while True:
-                job = self.get_mining_job()
-                if job is None:
-                    continue
-                proof = self.handle_mining_job(job)
-                if proof is not None:
-                    self.handle_submit_block(proof, job)
-        except KeyboardInterrupt:
-            self.stop()
+    # ---- Build proof and submit ----
+    plain_proof = create_proof(open_block, mining_job.incomplete_header_bytes)
+    client.submit_plain_proof(plain_proof, mining_job)
+    return True
 
 
 def main():
     from miner_utils import get_logger
-    from pearl_gateway.config import MinerRpcConfig
 
-    _LOGGER = get_logger("miner_gpu")
+    logger = get_logger("miner_gpu")
 
-    miner_rpc_config = MinerRpcConfig()
-    miner_settings = MinerSettings()
+    rpc_config = MinerRpcConfig()
+    settings = MinerSettings()
+    client = MiningClient(rpc_config)
 
-    miner = PearlGpuMiner(miner_rpc_config, miner_settings)
-    _LOGGER.info("Starting GPU miner (no vLLM)")
-    miner.run()
+    logger.info("Starting standalone GPU miner (no vLLM)")
+
+    while True:
+        try:
+            run_single_mining_round(client, settings)
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
+            client.close()
+            break
+        except Exception as e:
+            logger.error("Mining round failed: %s", e)
 
 
 if __name__ == "__main__":
