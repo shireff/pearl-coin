@@ -859,14 +859,180 @@ def _abstract_run_tensor_hash(
 
 
 # Fake Tensor function for torch.compile support
-@torch.library.register_fake("pearl_gemm::tensor_hash")
-def _abstract_tensor_hash(
-    data,
-    key,
-    out,
-    roots,
-    threads_per_block=128,
-    num_stages=2,
-    leaves_per_mt_block=512,
+def gpu_jackpot_hash(
+    jackpots,     # (num_candidates, num_combos, 16) uint32
+    keys,         # (num_candidates, 8) uint32
+    hashes,       # (num_candidates, num_combos, 8) uint32
+    num_candidates: int,
+    num_combos: int,
+    stream=None,
 ):
-    return None
+    """Compute BLAKE3 keyed hash of jackpot arrays on GPU.
+
+    Args:
+        jackpots: (num_candidates, num_combos, 16) uint32 tensor
+        keys: (num_candidates, 8) uint32 tensor
+        hashes: (num_candidates, num_combos, 8) uint32 output tensor
+        num_candidates: Number of mining candidates
+        num_combos: Number of combinations per candidate
+        stream: Optional CUDA stream
+
+    Returns:
+        hashes tensor with BLAKE3(keyed) hash of each jackpot
+    """
+    if stream is not None:
+        return pearl_gemm_cuda.gpu_jackpot_hash(jackpots, keys, hashes, num_candidates, num_combos, stream)
+    return pearl_gemm_cuda.gpu_jackpot_hash(jackpots, keys, hashes, num_candidates, num_combos)
+
+
+def create_mining_graph(
+    num_candidates: int,
+    num_combos: int,
+    tile_h: int,
+    tile_w: int,
+    m: int,
+    n: int,
+    k: int,
+    rank: int,
+    shared_mem_bytes: int,
+):
+    """Create a CUDA graph for batch mining.
+
+    Pre-captures the GPU mining kernel launch so subsequent
+    executions have minimal CPU overhead.
+
+    Args:
+        num_candidates: Number of mining candidates
+        num_combos: Number of combinations per candidate
+        tile_h: Tile height
+        tile_w: Tile width
+        m: Matrix A rows
+        n: Matrix B cols
+        k: Matrix inner dimension
+        rank: Noise rank
+        shared_mem_bytes: Shared memory size per block
+
+    Returns:
+        MiningGraphState handle
+    """
+    return pearl_gemm_cuda.create_mining_graph(
+        num_candidates, num_combos, tile_h, tile_w, m, n, k, rank, shared_mem_bytes
+    )
+
+
+def destroy_mining_graph(state):
+    """Destroy a CUDA mining graph and free associated resources."""
+    pearl_gemm_cuda.destroy_mining_graph(state)
+
+
+def launch_mining_graph(
+    state,
+    a_noised,
+    b_noised_t,
+    a_rows,
+    b_cols,
+    jobs,
+    jackpots,
+    keys,
+    hashes,
+):
+    """Launch a pre-captured mining CUDA graph.
+
+    Args:
+        state: MiningGraphState handle from create_mining_graph
+        a_noised: Device pointer to noised A matrix
+        b_noised_t: Device pointer to noised B^T matrix
+        a_rows: Device pointer to row indices
+        b_cols: Device pointer to column indices
+        jobs: Device pointer to job descriptors
+        jackpots: Device pointer to jackpot output
+        keys: Device pointer to BLAKE3 keys
+        hashes: Device pointer to hash output
+    """
+    pearl_gemm_cuda.launch_mining_graph(
+        state, a_noised, b_noised_t, a_rows, b_cols, jobs, jackpots, keys, hashes
+    )
+
+
+def update_mining_graph(
+    state,
+    num_candidates: int,
+    num_combos: int,
+    tile_h: int,
+    tile_w: int,
+    m: int,
+    n: int,
+    k: int,
+    rank: int,
+    shared_mem_bytes: int,
+):
+    """Update a captured mining graph with new parameters."""
+    pearl_gemm_cuda.update_mining_graph(
+        state, num_candidates, num_combos, tile_h, tile_w, m, n, k, rank, shared_mem_bytes
+    )
+
+
+def synchronize_mining_graph(state):
+    """Synchronize and wait for mining graph execution to complete."""
+    pearl_gemm_cuda.synchronize_mining_graph(state)
+
+
+def create_persistent_pipeline(
+    num_candidates: int,
+    num_combos: int,
+    tile_h: int,
+    tile_w: int,
+    m: int,
+    n: int,
+    k: int,
+    rank: int,
+    shared_mem_bytes: int,
+    stream=None,
+):
+    """Create a persistent mining pipeline (CUDA graph-based).
+
+    Returns a pipeline handle that can be reused across multiple
+    mining batches with minimal launch overhead.
+    """
+    if stream is not None:
+        return pearl_gemm_cuda.create_persistent_pipeline(
+            num_candidates, num_combos, tile_h, tile_w, m, n, k, rank, shared_mem_bytes, stream
+        )
+    return pearl_gemm_cuda.create_persistent_pipeline(
+        num_candidates, num_combos, tile_h, tile_w, m, n, k, rank, shared_mem_bytes
+    )
+
+
+def destroy_persistent_pipeline(pipeline):
+    """Destroy a persistent mining pipeline and free resources."""
+    pearl_gemm_cuda.destroy_persistent_pipeline(pipeline)
+
+
+def pipeline_set_buffers(pipeline, a_noised, b_noised_t, a_rows, b_cols, jobs):
+    """Set input/output buffers for a persistent mining pipeline.
+
+    Args:
+        pipeline: Pipeline handle from create_persistent_pipeline
+        a_noised: Device pointer to noised A matrix
+        b_noised_t: Device pointer to noised B^T matrix
+        a_rows: Device pointer to row indices
+        b_cols: Device pointer to column indices
+        jobs: Device pointer to job descriptors
+    """
+    pearl_gemm_cuda.pipeline_set_buffers(pipeline, a_noised, b_noised_t, a_rows, b_cols, jobs)
+
+
+def pipeline_enqueue_jobs(pipeline, num_jobs: int):
+    """Enqueue a batch of jobs into the persistent mining pipeline.
+
+    Args:
+        pipeline: Pipeline handle
+        num_jobs: Number of jobs to enqueue
+    """
+    pearl_gemm_cuda.pipeline_enqueue_jobs(pipeline, num_jobs)
+
+
+def pipeline_wait_for_completion(pipeline):
+    """Wait for all jobs in the persistent pipeline to complete."""
+     pearl_gemm_cuda.pipeline_wait_for_completion(pipeline)
+    pass
