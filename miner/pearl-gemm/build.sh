@@ -23,9 +23,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+TORCH_CUDA="$(python3 -c 'import torch; print(getattr(torch.version, "cuda", ""))' 2>/dev/null || true)"
+REQUIRED_CUDA="${TORCH_CUDA:-13.0}"
+
 if [ -z "${CUDA_HOME:-}" ]; then
-    TORCH_CUDA="$(python -c 'import torch; print(getattr(torch.version, "cuda", ""))' 2>/dev/null || true)"
-    REQUIRED_CUDA="${TORCH_CUDA:-13.0}"
     candidates="/usr/local/cuda-${REQUIRED_CUDA} /usr/local/cuda-${REQUIRED_CUDA%.*} /usr/local/cuda /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda-13 /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-*"
     for candidate in $candidates; do
         if [ -x "$candidate/bin/nvcc" ]; then
