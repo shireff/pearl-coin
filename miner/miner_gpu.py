@@ -26,6 +26,8 @@ from pearl_gemm import gpu_jackpot_hash, gpu_mine_batch, noise_gen
 
 DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
 DEFAULT_GATEWAY_TCP_PORT = 8337
+SUPPORTED_NOISE_RANKS = (64, 128)
+SUPPORTED_NOISE_GEN_THREAD_COUNTS = (32, 64, 128)
 
 
 def parse_args():
@@ -64,7 +66,7 @@ def parse_args():
     )
 
     mining = parser.add_argument_group("Mining parameters")
-    mining.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "256")))
+    mining.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "128")))
     mining.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "128")))
     mining.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "256")))
     mining.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "1024")))
@@ -146,6 +148,14 @@ def run_single_mining_round(
     k = settings.noise_range
     tile_h = settings.tile_size_m
     tile_w = settings.tile_size_n
+
+    if rank not in SUPPORTED_NOISE_RANKS:
+        nearest_rank = min(SUPPORTED_NOISE_RANKS, key=lambda supported: abs(supported - rank))
+        print(
+            f"[WARN] Unsupported noise rank {rank}; switching to supported rank {nearest_rank}. "
+            f"Supported values are {SUPPORTED_NOISE_RANKS}."
+        )
+        rank = nearest_rank
 
     # ── Allocate noise matrices ──────────────────────────────────────────────
     EAL          = torch.empty((m, rank), dtype=torch.int8,    device="cuda")
