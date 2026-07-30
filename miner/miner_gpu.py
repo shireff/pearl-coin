@@ -265,7 +265,7 @@ class MiningGraphSession:
 
         # ── Winner check: hash jackpots and compare to target ─────────────
         # Hash the jackpot arrays to get final hashes
-        hashes = gpu_jackpot_hash(jackpots, self.keys.squeeze(0))
+        hashes = gpu_jackpot_hash(jackpots, self.keys)
         
         _target_int = int(mining_job.target)
         for i in range(8):
