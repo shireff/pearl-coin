@@ -1034,5 +1034,4 @@ def pipeline_enqueue_jobs(pipeline, num_jobs: int):
 
 def pipeline_wait_for_completion(pipeline):
     """Wait for all jobs in the persistent pipeline to complete."""
-     pearl_gemm_cuda.pipeline_wait_for_completion(pipeline)
-    pass
+    pearl_gemm_cuda.pipeline_wait_for_completion(pipeline)
