@@ -5,6 +5,8 @@ import threading
 import time
 import traceback
 
+import pearl_mining
+
 CLONE_DIR = "/root/pearl-cion"
 MODEL_NAME = "pearl-ai/Llama-3.2-1B-Instruct-pearl"
 
@@ -17,12 +19,12 @@ COLS_PATTERN_SIZE = 64
 PINNED_POOL_SIZE = 256
 REFRESH_RATE = 0.5
 
-# pearl-gemm CUDA extension — built in pearl-cion repo, symlinked into .venv
 PEARL_GEMM_SO_SRC = "/root/pearl-cion/miner/pearl-gemm/src"
+
+GATEWAY_SOCKET = "/tmp/pearlgw.sock"
 
 
 def _install_pearl_gemm():
-    """Copy pearl_gemm_cuda.so into the .venv site-packages so vllm can import it."""
     import glob
     import shutil
 
@@ -101,19 +103,126 @@ def _print_gpu_snapshot():
     print("")
 
 
+def _mining_loop():
+    import json
+    import socket
+
+    from pearl_gateway.comm.dataclasses import MiningJob
+
+    rows_pattern = [0, 8, 64, 72]
+    cols_pattern = [0, 1, 8, 9, 32, 33, 40, 41]
+
+    mining_config = pearl_mining.MiningConfiguration(
+        common_dim=TILE_SIZE_K,
+        rank=NOISE_RANK,
+        mma_type=pearl_mining.MMAType.Int7xInt7ToInt32,
+        rows_pattern=pearl_mining.PeriodicPattern.from_list(rows_pattern),
+        cols_pattern=pearl_mining.PeriodicPattern.from_list(cols_pattern),
+    )
+
+    socket_path = GATEWAY_SOCKET
+    max_retries = 300
+    retry_count = 0
+
+    while retry_count < max_retries:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(socket_path)
+            break
+        except (FileNotFoundError, ConnectionRefusedError, OSError):
+            retry_count += 1
+            time.sleep(1)
+    else:
+        print("[WARN] Could not connect to gateway miner RPC, skipping mining loop")
+        return
+
+    reader = sock.makefile("r", encoding="utf-8")
+    writer = sock.makefile("w", encoding="utf-8")
+    request_id = 0
+
+    def rpc_call(method, params=None):
+        nonlocal request_id
+        request_id += 1
+        request = {"jsonrpc": "2.0", "method": method, "id": request_id}
+        request["params"] = params if params is not None else {}
+        writer.write(json.dumps(request) + "\n")
+        writer.flush()
+        line = reader.readline()
+        if not line:
+            raise ConnectionError("Connection closed by gateway")
+        response = json.loads(line.strip())
+        if "error" in response:
+            raise Exception(f"JSON-RPC error: {response['error']}")
+        return response.get("result")
+
+    print("[MINING] Direct mining loop started (no vLLM)")
+    _start_time = time.time()
+    _iterations = 0
+
+    try:
+        while True:
+            try:
+                job_dict = rpc_call("getMiningInfo")
+                mining_job = MiningJob(
+                    incomplete_header_bytes=bytes.fromhex(job_dict["incomplete_header_bytes"])
+                    if job_dict.get("incomplete_header_bytes", "").startswith("0x")
+                    else bytes.fromhex(job_dict["incomplete_header_bytes"]),
+                    target=job_dict["target"],
+                    cert_version=pearl_mining.CertificateVersion(job_dict.get("cert_version", 2)),
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to get mining job: {e}")
+                time.sleep(1)
+                continue
+
+            header = pearl_mining.IncompleteBlockHeader.from_bytes(
+                mining_job.incomplete_header_bytes
+            )
+
+            proof = pearl_mining.mine(
+                TILE_SIZE_M,
+                TILE_SIZE_N,
+                TILE_SIZE_K,
+                header,
+                mining_config,
+            )
+
+            proof_b64 = proof.to_base64()
+
+            try:
+                rpc_call("submitPlainProof", {
+                    "plain_proof": proof_b64,
+                    "mining_job": {
+                        "incomplete_header_bytes": job_dict["incomplete_header_bytes"],
+                        "target": job_dict["target"],
+                    },
+                })
+                _iterations += 1
+                elapsed = time.time() - _start_time
+                if _iterations % 10 == 0:
+                    print(f"[MINING] iter={_iterations} elapsed={elapsed:.0f}s proofs_submitted={_iterations}")
+            except Exception as e:
+                print(f"[WARN] Failed to submit proof: {e}")
+
+    except KeyboardInterrupt:
+        print("\n[MINING] Mining loop stopped by user")
+    except Exception as e:
+        print(f"[ERROR] Mining loop error: {e}")
+    finally:
+        sock.close()
+
+
 def run_mining():
     os.chdir(CLONE_DIR)
     _install_pearl_gemm()
 
-    # HuggingFace token for private model access
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if hf_token:
         os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
         os.environ["HF_TOKEN"] = hf_token
         print(f"[OK] HuggingFace token set ({len(hf_token)} chars)")
     else:
-        print("[WARN] No HF_TOKEN set — private model access may fail")
-        print("[WARN] Set: export HF_TOKEN=your_token_here")
+        print("[INFO] No HF_TOKEN set — running in direct mining mode (no vLLM)")
 
     os.environ["PEARLD_RPC_URL"] = "http://localhost:44107"
     os.environ["PEARLD_RPC_USER"] = "rpcuser"
@@ -122,14 +231,13 @@ def run_mining():
     os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
     os.environ["PEARL_LOG_LEVEL"] = "INFO"
 
-    pearld_proc = gateway_proc = vllm_proc = None
+    pearld_proc = gateway_proc = None
 
     try:
         _print_startup_banner()
         _print_gpu_snapshot()
 
-        # Start pearld
-        print("\n[1/4] Starting pearld...")
+        print("\n[1/3] Starting pearld...")
         pearld_proc = subprocess.Popen(
             [f"{CLONE_DIR}/bin/pearld",
              "--rpcuser=rpcuser", "--rpcpass=rpcpass",
@@ -141,15 +249,13 @@ def run_mining():
         threading.Thread(target=_stream_logs, args=("pearld", pearld_proc), daemon=True).start()
         time.sleep(3)
 
-        # Start pearl-gateway using the current Python interpreter
-        print("[2/4] Starting pearl-gateway...")
+        print("[2/3] Starting pearl-gateway...")
         gateway_proc = subprocess.Popen(
             [sys.executable, "-m", "pearl_gateway"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
         threading.Thread(target=_stream_logs, args=("gateway", gateway_proc), daemon=True).start()
 
-        # Wait for gateway socket with polling
         socket_path = "/tmp/pearlgw.sock"
         for _ in range(60):
             if os.path.exists(socket_path):
@@ -166,63 +272,19 @@ def run_mining():
                 gateway_proc.terminate()
                 gateway_proc = None
 
-        # Start vllm serve using the current Python interpreter
-        print("[3/4] Starting vllm serve with Pearl mining plugin...")
-        vllm_env = os.environ.copy()
-        vllm_env["PYTHONPATH"] = os.pathsep.join(
-            [CLONE_DIR, vllm_env.get("PYTHONPATH", "")]
-        )
-        vllm_proc = subprocess.Popen(
-            [sys.executable, "-m", "vllm", "serve", MODEL_NAME,
-             "--host", "0.0.0.0", "--port", "8000",
-             "--max-model-len", "2048",
-             "--gpu-memory-utilization", "0.9",
-             "--enforce-eager"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            env=vllm_env
-        )
-        threading.Thread(target=_stream_logs, args=("vllm", vllm_proc), daemon=True).start()
+        print("[3/3] Starting direct mining loop (no vLLM)...")
+        _mining_loop()
 
-        print("[4/4] Monitoring logs (300s)...")
-        print("=" * 70)
-
-        _iteration_count = 0
-        _start_time = time.time()
-
-        for _ in range(300):
-            time.sleep(1)
-            _iteration_count += 1
-
-            if pearld_proc.poll() is not None:
-                print("[ERROR] pearld stopped!")
-                break
-            if gateway_proc is not None and gateway_proc.poll() is not None:
-                print("[WARN] gateway stopped, continuing without it")
-                gateway_proc = None
-            if vllm_proc is not None and vllm_proc.poll() is not None:
-                print("[WARN] vllm stopped, continuing without it")
-                vllm_proc = None
-
-            if _iteration_count == 1:
-                _print_gpu_snapshot()
-
-            elapsed = time.time() - _start_time
-            if _iteration_count % 10 == 0 and elapsed > 0:
-                nonces_per_iter = (TILE_SIZE_M * TILE_SIZE_N) // NOISE_RANK
-                total_nonces = nonces_per_iter * _iteration_count
-                tmok_per_s = total_nonces / elapsed / 1000.0
-                print(f"[stats] iter={_iteration_count} elapsed={elapsed:.0f}s "
-                      f"tmok/s={tmok_per_s:.2f}")
+        print("[DONE] Mining loop finished")
 
     except Exception:
         print("\n[FATAL] run_mining crashed:")
         traceback.print_exc()
-        # Non-zero exit so the Lightning Job is reported as Failed, not Completed
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\nStopping all processes...")
     finally:
-        for proc, name in [(pearld_proc, "pearld"), (gateway_proc, "gateway"), (vllm_proc, "vllm")]:
+        for proc, name in [(pearld_proc, "pearld"), (gateway_proc, "gateway")]:
             if proc is None:
                 continue
             proc.terminate()
