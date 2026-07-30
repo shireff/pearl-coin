@@ -29,6 +29,54 @@ DEFAULT_GATEWAY_TCP_PORT = 8337
 SUPPORTED_NOISE_RANKS = (64, 128)
 SUPPORTED_NOISE_GEN_THREAD_COUNTS = (32, 64, 128)
 JOB_STRUCT_BYTES = 128
+DEFAULT_TILE_SIZE_M = 64
+DEFAULT_TILE_SIZE_N = 64
+DEFAULT_TILE_SIZE_K = 128
+DEFAULT_MAX_SHARED_MEMORY_BYTES = 100_000
+
+
+def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
+    return (
+        tile_h * tile_w
+        + tile_h * (rank + 1)
+        + (rank + 1) * tile_w
+        + 16
+    ) * 4
+
+
+def get_cuda_shared_memory_limit() -> int:
+    try:
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            props = torch.cuda.get_device_properties(0)
+            return int(
+                getattr(props, "max_shared_memory_per_block", None)
+                or getattr(props, "shared_memory_per_block", None)
+                or DEFAULT_MAX_SHARED_MEMORY_BYTES
+            )
+    except Exception:
+        pass
+    return DEFAULT_MAX_SHARED_MEMORY_BYTES
+
+
+def get_gpu_name() -> str | None:
+    try:
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            props = torch.cuda.get_device_properties(0)
+            return props.name
+    except Exception:
+        pass
+    return None
+
+
+def choose_safe_tile_size(tile_h: int, tile_w: int, rank: int, shared_mem_limit: int) -> tuple[int, int]:
+    if estimate_shared_mem_bytes(tile_h, tile_w, rank) <= shared_mem_limit:
+        return tile_h, tile_w
+
+    for candidate in ((128, 128), (64, 64), (32, 32), (16, 16)):
+        if estimate_shared_mem_bytes(candidate[0], candidate[1], rank) <= shared_mem_limit:
+            return candidate
+
+    return DEFAULT_TILE_SIZE_M, DEFAULT_TILE_SIZE_N
 
 
 def parse_args():
@@ -69,9 +117,9 @@ def parse_args():
     mining = parser.add_argument_group("Mining parameters")
     mining.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "128")))
     mining.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "128")))
-    mining.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "256")))
-    mining.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "1024")))
-    mining.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "256")))
+    mining.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "64")))
+    mining.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "64")))
+    mining.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "128")))
 
     return parser.parse_args()
 
@@ -309,11 +357,24 @@ def main():
             host=args.gateway_host,
             port=args.gateway_port,
         )
+
+        shared_mem_limit = get_cuda_shared_memory_limit()
+        gpu_name = get_gpu_name()
+        tile_m, tile_n = choose_safe_tile_size(args.tile_m, args.tile_n, args.noise_rank, shared_mem_limit)
+        if (tile_m, tile_n) != (args.tile_m, args.tile_n):
+            logger.warning(
+                "Requested tile size (%s,%s) is unsafe for this GPU; using safe tile size (%s,%s).",
+                args.tile_m, args.tile_n, tile_m, tile_n,
+            )
+
+        if gpu_name is not None:
+            logger.info("Detected GPU: %s, shared_mem_limit=%s", gpu_name, shared_mem_limit)
+
         settings = MinerSettings(
             noise_range=args.noise_range,
             noise_rank=args.noise_rank,
-            tile_size_m=args.tile_m,
-            tile_size_n=args.tile_n,
+            tile_size_m=tile_m,
+            tile_size_n=tile_n,
             tile_size_k=args.tile_k,
         )
         client = MiningClient(rpc_config)
