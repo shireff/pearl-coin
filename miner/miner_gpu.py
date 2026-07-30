@@ -155,10 +155,12 @@ def run_single_mining_round(
         B_t=None,
         A_row_indices=[],
         B_column_indices=[],
+        commitment_hash=None,
         noise_rank=settings.noise_rank,
     )
 
     rank = settings.noise_rank
+    kernel_start = time.time()
     noise_gen(R=rank, num_threads=64)
 
     m = settings.noise_range
@@ -188,6 +190,7 @@ def run_single_mining_round(
         k=k,
         rank=rank,
     )
+    gpu_mine_batch_time = time.time() - kernel_start
 
     keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
     num_combos = 1
@@ -202,6 +205,20 @@ def run_single_mining_round(
         num_candidates=1,
         num_combos=num_combos,
     )
+
+    elapsed = time.time() - kernel_start
+    tmok = (tile_h * tile_w) / rank / 1000.0
+    logger = None
+    try:
+        from miner_utils import get_logger
+        logger = get_logger("miner_gpu")
+    except Exception:
+        pass
+
+    if logger is not None:
+        logger.info("GPU round time: %.3fs, tmok/s=%.2f", elapsed, tmok / elapsed if elapsed > 0 else 0.0)
+    else:
+        print(f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok / elapsed if elapsed > 0 else 0.0:.2f}")
 
     target_tensor = torch.tensor(
         [mining_job.target], dtype=torch.uint32, device="cuda"
