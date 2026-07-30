@@ -49,16 +49,16 @@ The CPU only:
 
 ### Software
 
-| Tool         | Required Version | Source                                           |
-| ------------ | ---------------- | ------------------------------------------------ |
-| Python       | **3.12 exactly** | `pyproject.toml`: `requires-python = "==3.12.*"` |
-| uv           | Latest           | workspace package manager                        |
-| CUDA Toolkit | **13.0**         | `pyproject.toml`: `cuda-bindings>=13.0,<13.1`    |
-| Rust         | Latest stable    | required for `py-pearl-mining`, `zk-pow`         |
-| Go           | 1.26+            | required for `pearld`, `oyster`, `prlctl`        |
-| Task         | Latest           | `Taskfile.yml` shortcuts                         |
-| Docker       | 20.x+            | optional — production container path             |
-| Git          | 2.x              | cloning the repository                           |
+| Tool         | Required Version | Source                                                  |
+| ------------ | ---------------- | ------------------------------------------------------- |
+| Python       | **3.12.x**       | https://www.python.org/downloads/release/python-3120/   |
+| uv           | Latest           | https://astral.sh/uv/                                   |
+| CUDA Toolkit | **13.0**         | https://developer.nvidia.com/cuda-13-0-download-archive |
+| Rust         | stable           | https://rustup.rs/                                      |
+| Go           | 1.26+            | https://go.dev/dl/                                      |
+| Task         | Latest           | https://taskfile.dev/installation/                      |
+| Docker       | 20.x+            | https://docs.docker.com/get-docker/                     |
+| Git          | 2.x              | https://git-scm.com/downloads                           |
 
 ---
 
@@ -79,8 +79,18 @@ git submodule update --init --recursive
 2. Install CUDA Toolkit 13.0:
 
 ```bash
-# Install the CUDA 13.0 toolkit for your distro
-nvcc --version
+# Ubuntu example:
+sudo apt-get update
+sudo apt-get install -y cuda-toolkit-13-0
+
+# Or download and install from NVIDIA:
+# https://developer.nvidia.com/cuda-13-0-download-archive
+```
+
+Verify CUDA:
+
+```bash
+nvcc -V
 # expected output includes "release 13.0"
 ```
 
@@ -88,20 +98,43 @@ If CUDA is installed in a nonstandard path, set:
 
 ```bash
 export CUDA_HOME=/usr/local/cuda-13.0
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 ```
 
-3. Install the required tools:
+3. Install Python 3.12 and required tooling:
 
 ```bash
-# uv package manager
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Ubuntu example:
+sudo apt-get install -y python3.12 python3.12-venv python3.12-dev python3-pip
 
-# Rust toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Install uv package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
-# Go toolchain
-# use your package manager or download from https://go.dev/dl/
+# Install Go
+wget https://go.dev/dl/go1.26.12.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.26.12.linux-amd64.tar.gz
+export PATH="/usr/local/go/bin:$PATH"
+
+# Install Task runner
+sh -c "$(curl -fsSL https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Verify the tools:
+
+```bash
+python3 --version
+uv --version
+rustc --version
+cargo --version
+go version
+task --version
 ```
 
 4. Build the Python workspace and CUDA extension:
@@ -110,7 +143,27 @@ source ~/.cargo/env
 uv sync --package vllm-miner
 ```
 
-5. Build the blockchain binaries if you need the full node locally:
+5. Verify CUDA/PyTorch compatibility:
+
+```bash
+python3 -c "import torch; print(torch.__version__, torch.version.cuda)"
+nvcc -V
+```
+
+Expected output will include CUDA 13.0 / `cu130`, for example:
+
+```bash
+2.1.1+cu130 13.0
+```
+
+If PyTorch installs a non-CUDA wheel, install the correct package manually:
+
+```bash
+python3 -m pip install --upgrade pip
+python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+```
+
+6. Build the blockchain binaries if you need the full node locally:
 
 ```bash
 task build:blockchain
@@ -146,24 +199,32 @@ git submodule update --init --recursive
 ```
 
 2. Install CUDA Toolkit 13.0 and add it to PATH.
-3. Install `uv`, Rust, and Go, or use Windows installers from their official sites.
 
-4. Verify Python 3.12 is available and that your environment can run `python`.
+3. Install Python 3.12 from the official Windows installer.
 
-5. Build the Python workspace:
+4. Install `uv`, Rust, and Go using official installers.
+
+5. Verify Python and CUDA:
+
+```powershell
+python --version
+nvcc -V
+```
+
+6. Build the Python workspace:
 
 ```powershell
 uv sync --package vllm-miner
 ```
 
-6. If CUDA kernel build fails, run from PowerShell:
+7. If CUDA kernel build fails, run from PowerShell or WSL:
 
 ```powershell
 cd miner/pearl-gemm
 bash build.sh --no-pull
 ```
 
-> Note: Windows support may require WSL or a Linux-like shell for the CUDA build step.
+> Note: Windows support may require WSL or a Linux-compatible shell for the CUDA build step.
 
 ### 2. Existing checkout on a machine that already has the repo
 
@@ -903,6 +964,19 @@ export PEARL_GEMM_FORCE_BUILD=TRUE
 uv sync --package vllm-miner
 # Make sure nvcc --version shows 13.x
 ```
+
+### No space left on device while extracting Python wheels
+
+If `uv sync` fails while extracting a wheel into `/tmp`, the host temporary directory may be too small.
+Use a larger temp directory and retry with:
+
+```bash
+mkdir -p /root/uv-tmp
+export TMPDIR=/root/uv-tmp
+uv sync --package vllm-miner
+```
+
+Make sure the target path has at least 10-20 GB free space.
 
 ### pearl-gateway socket never appears
 
