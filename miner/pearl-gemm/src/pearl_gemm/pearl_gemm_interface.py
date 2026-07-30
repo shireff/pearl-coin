@@ -904,7 +904,6 @@ def create_mining_graph(
     n: int,
     k: int,
     rank: int,
-    shared_mem_bytes: int,
 ):
     """Create a CUDA graph for batch mining.
 
@@ -920,13 +919,12 @@ def create_mining_graph(
         n: Matrix B cols
         k: Matrix inner dimension
         rank: Noise rank
-        shared_mem_bytes: Shared memory size per block
 
     Returns:
         MiningGraphState handle
     """
     return pearl_gemm_cuda.create_mining_graph(
-        num_candidates, num_combos, tile_h, tile_w, m, n, k, rank, shared_mem_bytes
+        num_candidates, num_combos, tile_h, tile_w, m, n, k, rank
     )
 
 
