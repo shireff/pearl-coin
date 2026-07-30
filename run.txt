@@ -13,4 +13,53 @@ python miner/miner_gpu.py \
   --rpc-url http://127.0.0.1:44107 \
   --rpc-user rpcuser \
   --rpc-password rpcpass \
+  --mining-address prl1pmt5e954cpepqmvnpm8sfywmjhvupjpdd5trtkdw8jca86auuvlls45s2x8 \
+  --P 4 --Q 4
+
+
+for venv
+cd ~/pearl-cion
+python3.12 -m venv pearl-venv
+source ~/pearl-cion/pearl-venv/bin/activate
+python -m pip install -U pip wheel setuptools
+pip install \
+torch==2.11.0+cu130 \
+torchvision==0.26.0+cu130 \
+torchaudio==2.11.0+cu130 \
+--index-url https://download.pytorch.org/whl/cu130
+cd ~/pearl-cion/miner/pearl-gemm-build-utils
+pip install -e .
+cd ~/pearl-cion/miner/pearl-gemm
+python setup.py build_ext --inplace
+
+python -c "import pearl_gemm_cuda; print('BUILD OK')"
+
+# ── Fix: Session closes and reopens — wrong venv activated ──────────────────
+# Problem: After SSH/tmux session restart, ~/pearl-cion/pearl-venv activates
+#          automatically but torch is NOT installed there.
+#          Torch lives in /workspace/pearl-venv — use that one instead.
+
+# Step 1: Activate the correct venv (has torch + pearl_gemm)
+source /workspace/pearl-venv/bin/activate
+
+# Step 2: Install missing miner packages (only needed once after new session)
+pip install loguru --quiet
+pip install -e ~/pearl-cion/miner/miner-utils --no-deps --quiet
+pip install -e ~/pearl-cion/py-pearl-mining --no-deps --quiet
+pip install -e ~/pearl-cion/miner/pearl-gateway --no-deps --quiet
+pip install -e ~/pearl-cion/miner/miner-base --no-deps --quiet
+
+# Step 3: Verify
+python -c "import torch; print('torch OK:', torch.__version__, torch.version.cuda)"
+python -c "from miner_base.gateway_client import MiningClient; print('miner_base OK')"
+
+# Step 4: Make fix permanent — add to ~/.bashrc so every new session uses correct venv
+echo 'source /workspace/pearl-venv/bin/activate' >> ~/.bashrc
+
+# Step 5: Run miner
+cd ~/pearl-cion
+python miner/miner_gpu.py \
+  --rpc-url http://127.0.0.1:44107 \
+  --rpc-user rpcuser \
+  --rpc-password rpcpass \
   --mining-address prl1pmt5e954cpepqmvnpm8sfywmjhvupjpdd5trtkdw8jca86auuvlls45s2x8

@@ -131,6 +131,12 @@ def parse_args():
     g.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "64")))
     g.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "64")))
     g.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "128")))
+    g.add_argument("--P", type=int, default=int(os.environ.get("miner_P", "4")),
+                   help="Number of A-row partitions (more = more nonces per round)")
+    g.add_argument("--Q", type=int, default=int(os.environ.get("miner_Q", "4")),
+                   help="Number of B-col partitions (more = more nonces per round)")
+    g.add_argument("--num-jobs", type=int, default=int(os.environ.get("miner_num_jobs", "1")),
+                   help="Number of parallel mining jobs per round")
     return parser.parse_args()
 
 
@@ -201,6 +207,17 @@ class MiningGraphSession:
         self.tile_h = tile_h
         self.tile_w = tile_w
 
+        # Clamp P and Q to avoid repeating the same tile rows/cols
+        # P*tile_h should not exceed m to ensure diverse partitions
+        max_P = max(1, m // tile_h)
+        max_Q = max(1, n // tile_w)
+        if P > max_P:
+            P = max_P
+        if Q > max_Q:
+            Q = max_Q
+        self.clamped_P = P
+        self.clamped_Q = Q
+
         # ── Noise matrices (allocated once) ──────────────────────────────
         self.EAL         = torch.empty((m, rank), dtype=torch.int8,    device="cuda")
         self.EAL_fp16    = torch.empty((m, rank), dtype=torch.float16, device="cuda")
@@ -215,66 +232,129 @@ class MiningGraphSession:
         self.key_B       = allocate_aligned_byte_tensor(32, align=16, device="cuda")
 
         # ── Mining I/O buffers (allocated once, reused every round) ──────
-        self.A_noised   = torch.zeros((num_jobs, m, k), dtype=torch.int32, device="cuda")
-        self.B_noised_t = torch.zeros((num_jobs, n, k), dtype=torch.int32, device="cuda")
+        self.A_noised   = torch.zeros((num_jobs, m, k), dtype=torch.int32, device="cuda").contiguous()
+        self.B_noised_t = torch.zeros((num_jobs, n, k), dtype=torch.int32, device="cuda").contiguous()
         self.a_rows     = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)
         self.b_cols     = torch.arange(tile_w, dtype=torch.int32, device="cuda").unsqueeze(0)
+
+        # Generate P diverse row partitions from [0, m) — each partition samples
+        # tile_h rows without replacement from the full m rows.
+        # This ensures each (p,q) combination covers different parts of the matrix.
+        a_rows_list = []
+        for p in range(P):
+            offset = (p * tile_h) % m
+            rows = torch.arange(offset, offset + tile_h, dtype=torch.int32) % m
+            a_rows_list.append(rows)
+        self.a_rows_data = torch.stack(a_rows_list).to(device="cuda").contiguous()  # P x tile_h, contiguous
+
+        b_cols_list = []
+        for q in range(Q):
+            offset = (q * tile_w) % n
+            cols = torch.arange(offset, offset + tile_w, dtype=torch.int32) % n
+            b_cols_list.append(cols)
+        self.b_cols_data = torch.stack(b_cols_list).to(device="cuda").contiguous()  # Q x tile_w, contiguous
         
-        # a_rows_data and b_cols_data for gpu_mine_batch (P x tile_h and Q x tile_w)
-        self.a_rows_data = self.a_rows.repeat(P, 1)  # P copies for P partitions
-        self.b_cols_data = self.b_cols.repeat(Q, 1)  # Q copies for Q partitions
-        
-        self.P = P
-        self.Q = Q
+        self.P = self.clamped_P
+        self.Q = self.clamped_Q
         self.jobs       = allocate_aligned_byte_tensor(JOB_STRUCT_BYTES, align=16, device="cuda")
         self.jackpots   = torch.empty((num_jobs, self.num_combos, 16), dtype=torch.uint32, device="cuda")
         self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
         self.hashes     = torch.empty((num_jobs, self.num_combos, 8), dtype=torch.uint32, device="cuda")
 
         # ── Pre-allocated target buffer (updated in-place each round) ────
-        # Avoids torch.tensor() allocation on the hot path
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
 
+        # ── CUDA Graph for noise_gen (stable kernel, captured once) ──────
+        # noise_gen has fixed input shapes every round — safe to capture.
+        # Warmup runs first (required by torch.cuda.graph).
+        self._noise_stream = torch.cuda.Stream()
+        self._noise_graph = None
+        with torch.cuda.stream(self._noise_stream):
+            # Warmup: 3 runs to ensure CUDA caches are warm
+            for _ in range(3):
+                noise_gen(
+                    R=self.rank, num_threads=64,
+                    EAL=self.EAL, EAL_fp16=self.EAL_fp16,
+                    EAR_R_major=self.EAR_R_major, EAR_K_major=self.EAR_K_major,
+                    EBL_R_major=self.EBL_R_major, EBL_K_major=self.EBL_K_major,
+                    EBR=self.EBR, EBR_fp16=self.EBR_fp16,
+                    key_A=self.key_A, key_B=self.key_B,
+                )
+            torch.cuda.synchronize()
+            # Capture
+            self._noise_graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self._noise_graph, stream=self._noise_stream):
+                noise_gen(
+                    R=self.rank, num_threads=64,
+                    EAL=self.EAL, EAL_fp16=self.EAL_fp16,
+                    EAR_R_major=self.EAR_R_major, EAR_K_major=self.EAR_K_major,
+                    EBL_R_major=self.EBL_R_major, EBL_K_major=self.EBL_K_major,
+                    EBR=self.EBR, EBR_fp16=self.EBR_fp16,
+                    key_A=self.key_A, key_B=self.key_B,
+                )
+
+        # ── CUDA Events for accurate GPU timing ──────────────────────────
+        self._t_start = torch.cuda.Event(enable_timing=True)
+        self._t_end   = torch.cuda.Event(enable_timing=True)
+
+        # ── Async copy stream for non-blocking D2H operations ────────────
+        self._copy_stream = torch.cuda.Stream()
+
+        # ── Mining stream for async kernel dispatch ───────────────────────
+        self._mining_stream = torch.cuda.Stream()
+
     def run_round(self, mining_job: MiningJob) -> bool:
-        # ── Refresh noise keys in-place (no new tensor allocated) ────────
+        self._t_start.record()
+
+        # ── Refresh noise keys in-place, then replay captured noise_gen graph ──
         self.key_A.random_(0, 256)
         self.key_B.random_(0, 256)
+        if self._noise_graph is not None:
+            self._noise_graph.replay()
+        else:
+            noise_gen(
+                R=self.rank, num_threads=64,
+                EAL=self.EAL, EAL_fp16=self.EAL_fp16,
+                EAR_R_major=self.EAR_R_major, EAR_K_major=self.EAR_K_major,
+                EBL_R_major=self.EBL_R_major, EBL_K_major=self.EBL_K_major,
+                EBR=self.EBR, EBR_fp16=self.EBR_fp16,
+                key_A=self.key_A, key_B=self.key_B,
+            )
 
-        noise_gen(
-            R=self.rank, num_threads=64,
-            EAL=self.EAL, EAL_fp16=self.EAL_fp16,
-            EAR_R_major=self.EAR_R_major, EAR_K_major=self.EAR_K_major,
-            EBL_R_major=self.EBL_R_major, EBL_K_major=self.EBL_K_major,
-            EBR=self.EBR, EBR_fp16=self.EBR_fp16,
-            key_A=self.key_A, key_B=self.key_B,
-        )
-
-        # ── GPU mining kernel (direct call, no CUDA Graph) ───────────────
-        # gpu_mine_batch returns jackpot arrays; we hash them for winner check
-        jackpots = gpu_mine_batch(
-            self.A_noised,           # num_jobs x m x k, int32
-            self.B_noised_t,         # num_jobs x n x k, int32
-            self.a_rows_data,        # P x tile_h, int32
-            self.b_cols_data,        # Q x tile_w, int32
-            self.jobs,               # num_jobs x MiningJob
-            self.num_jobs,
-            self.P, self.Q,
-            self.tile_h, self.tile_w,
-            self.m, self.n, self.k, self.rank,
-        )
+        # ── GPU mining kernel — dispatched on dedicated stream ────────────
+        with torch.cuda.stream(self._mining_stream):
+            jackpots = gpu_mine_batch(
+                self.A_noised,
+                self.B_noised_t,
+                self.a_rows_data,
+                self.b_cols_data,
+                self.jobs,
+                self.num_jobs,
+                self.P, self.Q,
+                self.tile_h, self.tile_w,
+                self.m, self.n, self.k, self.rank,
+            )
+        # Sync mining stream before reading results
+        self._mining_stream.synchronize()
 
         # ── Winner check: hash jackpots and compare to target ─────────────
         # Hash the jackpot arrays to get final hashes
         hashes = gpu_jackpot_hash(jackpots, self.keys)
         
+        # Update target in-place using vectorized bit-extraction (no Python loop)
         _target_int = int(mining_job.target)
-        for i in range(8):
-            self._target_buf[i] = (_target_int >> (32 * i)) & 0xFFFFFFFF
-        hashes_i64 = hashes.to(torch.int64)
-        winners = torch.nonzero(
-            (hashes_i64 <= self._target_buf.unsqueeze(0)).all(dim=-1), as_tuple=False
+        _shifts = torch.arange(8, dtype=torch.int64, device="cuda") * 32
+        self._target_buf.copy_(
+            torch.tensor(
+                [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)],
+                dtype=torch.int64, device="cpu"
+            ).cuda(non_blocking=True)
         )
-        return winners.numel() > 0
+        # Winner check: all 8 uint32 words of hash must be <= target
+        hashes_i64 = hashes.view(-1, 8).to(dtype=torch.int64)
+        any_winner = (hashes_i64 <= self._target_buf.unsqueeze(0)).all(dim=-1).any()
+        self._t_end.record()
+        return bool(any_winner)
 
     def build_proof(self, mining_job: MiningJob):
         from pearl_gateway.comm.dataclasses import OpenedBlockInfo
@@ -290,8 +370,9 @@ class MiningGraphSession:
         return create_proof(open_block, mining_job.incomplete_header_bytes)
 
     def close(self):
-        # No CUDA Graph to destroy - direct kernel calls don't hold state
-        pass
+        if self._noise_graph is not None:
+            self._noise_graph.reset()
+            self._noise_graph = None
 
 
 def main():
@@ -353,20 +434,25 @@ def main():
         )
         client = MiningClient(rpc_config)
 
-        logger.info("Initialising CUDA Graph session...")
-        session = MiningGraphSession(settings, num_jobs=1, P=1, Q=1)
+        P = args.P
+        Q = args.Q
+        num_jobs = args.num_jobs
+        logger.info(f"Initialising mining session num_jobs={num_jobs} P={P} Q={Q} num_combos={P*Q}...")
+        session = MiningGraphSession(settings, num_jobs=num_jobs, P=P, Q=Q)
         smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
-        logger.info(f"CUDA Graph ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB")
+        logger.info(f"Session ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB  num_jobs={num_jobs}  P={session.P}  Q={session.Q}  combos={session.P*session.Q}")
 
         while True:
             try:
                 mining_job: MiningJob = client.get_mining_info()
-                t0 = time.time()
                 won = session.run_round(mining_job)
-                elapsed = time.time() - t0
-                tmok = (session.tile_h * session.tile_w) / session.rank / 1000.0
+                # Sync CUDA events to get accurate GPU kernel time
+                session._t_end.synchronize()
+                elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0  # ms → s
+                # tmok = nonces per round = tile_h × tile_w × P × Q / rank / 1000
+                tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                 tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
-                logger.info(f"GPU round time: {elapsed:.3f}s, tmok/s={tmok_per_s:.2f}")
+                logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
                 if won:
                     plain_proof = session.build_proof(mining_job)
                     client.submit_plain_proof(plain_proof, mining_job)
