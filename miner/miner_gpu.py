@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Standalone GPU mining node without vLLM dependency.
 
-Uses CUDA Graph capture to eliminate per-round kernel launch overhead:
-  noise_gen() → [CUDA Graph: mine_batch + jackpot_hash] (captured once, replayed every round)
+Uses direct gpu_mine_batch kernel calls each round (no CUDA Graph):
+  noise_gen() → gpu_mine_batch() → gpu_jackpot_hash()
 """
 
 import argparse
@@ -25,10 +25,8 @@ from pearl_gateway.comm.dataclasses import MiningJob
 from pearl_gateway.config import MinerRpcConfig
 from pearl_gemm import (
     noise_gen,
-    create_mining_graph,
-    launch_mining_graph,
-    synchronize_mining_graph,
-    destroy_mining_graph,
+    gpu_mine_batch,
+    gpu_jackpot_hash,
 )
 
 DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
@@ -221,6 +219,13 @@ class MiningGraphSession:
         self.B_noised_t = torch.zeros((num_jobs, n, k), dtype=torch.int32, device="cuda")
         self.a_rows     = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)
         self.b_cols     = torch.arange(tile_w, dtype=torch.int32, device="cuda").unsqueeze(0)
+        
+        # a_rows_data and b_cols_data for gpu_mine_batch (P x tile_h and Q x tile_w)
+        self.a_rows_data = self.a_rows.repeat(P, 1)  # P copies for P partitions
+        self.b_cols_data = self.b_cols.repeat(Q, 1)  # Q copies for Q partitions
+        
+        self.P = P
+        self.Q = Q
         self.jobs       = allocate_aligned_byte_tensor(JOB_STRUCT_BYTES, align=16, device="cuda")
         self.jackpots   = torch.empty((num_jobs, self.num_combos, 16), dtype=torch.uint32, device="cuda")
         self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
@@ -229,13 +234,6 @@ class MiningGraphSession:
         # ── Pre-allocated target buffer (updated in-place each round) ────
         # Avoids torch.tensor() allocation on the hot path
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
-
-        # ── CUDA Graph (captured once) ────────────────────────────────────
-        self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank)
-        if self.graph_state is None:
-            raise RuntimeError(
-                f"create_mining_graph failed for tile=({tile_h},{tile_w}) — try smaller tile size"
-            )
 
     def run_round(self, mining_job: MiningJob) -> bool:
         # ── Refresh noise keys in-place (no new tensor allocated) ────────
@@ -251,22 +249,28 @@ class MiningGraphSession:
             key_A=self.key_A, key_B=self.key_B,
         )
 
-        # ── Single graph launch + single sync ─────────────────────────────
-        err = launch_mining_graph(
-            self.graph_state,
-            self.A_noised, self.B_noised_t,
-            self.a_rows, self.b_cols,
-            self.jobs, self.jackpots, self.keys, self.hashes,
+        # ── GPU mining kernel (direct call, no CUDA Graph) ───────────────
+        # gpu_mine_batch returns jackpot arrays; we hash them for winner check
+        jackpots = gpu_mine_batch(
+            self.A_noised,           # num_jobs x m x k, int32
+            self.B_noised_t,         # num_jobs x n x k, int32
+            self.a_rows_data,        # P x tile_h, int32
+            self.b_cols_data,        # Q x tile_w, int32
+            self.jobs,               # num_jobs x MiningJob
+            self.num_jobs,
+            self.P, self.Q,
+            self.tile_h, self.tile_w,
+            self.m, self.n, self.k, self.rank,
         )
-        if err is not None and err != 0:
-            raise RuntimeError(f"launch_mining_graph failed: cudaError {err}")
-        synchronize_mining_graph(self.graph_state)
 
-        # ── Winner check: uint256 → 8×int64, in-place update of target ───
+        # ── Winner check: hash jackpots and compare to target ─────────────
+        # Hash the jackpot arrays to get final hashes
+        hashes = gpu_jackpot_hash(jackpots, self.keys.squeeze(0))
+        
         _target_int = int(mining_job.target)
         for i in range(8):
             self._target_buf[i] = (_target_int >> (32 * i)) & 0xFFFFFFFF
-        hashes_i64 = self.hashes.squeeze(0).to(torch.int64)
+        hashes_i64 = hashes.to(torch.int64)
         winners = torch.nonzero(
             (hashes_i64 <= self._target_buf.unsqueeze(0)).all(dim=-1), as_tuple=False
         )
@@ -286,9 +290,8 @@ class MiningGraphSession:
         return create_proof(open_block, mining_job.incomplete_header_bytes)
 
     def close(self):
-        if self.graph_state is not None:
-            destroy_mining_graph(self.graph_state)
-            self.graph_state = None
+        # No CUDA Graph to destroy - direct kernel calls don't hold state
+        pass
 
 
 def main():
