@@ -335,10 +335,7 @@ def main():
                 last = tb[-1] if tb else None
                 location = f"{last.filename}:{last.lineno} in {last.name}" if last else "unknown"
                 logger.error(
-                    "Mining round failed — %s: %s  [at %s]",
-                    type(exc).__name__,
-                    exc,
-                    location,
+                    f"Mining round failed — {type(exc).__name__}: {exc}  [at {location}]"
                 )
 
     except KeyboardInterrupt:
