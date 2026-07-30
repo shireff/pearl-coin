@@ -48,9 +48,16 @@ def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = 
 
 
 def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
-    """Match gpu_mining_launch.cu formula: (tile_h*tile_w + tile_h*(rank+1) + (rank+1)*tile_w + 16) * 4"""
-    smem_a_pitch = tile_h * (rank + 1)
-    smem_b_pitch = (rank + 1) * tile_w
+    """Match gpu_mining_launch.cu formula exactly, including align4 padding.
+
+    align4(x) = (x + 3) & ~3  — rounds up to next multiple of 4
+    smem_a_pitch = tile_h * align4(rank + 1)
+    smem_b_pitch = align4(rank + 1) * tile_w
+    total = (tile_h*tile_w + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * sizeof(int32_t)
+    """
+    aligned_rank_plus_1 = (rank + 1 + 3) & ~3  # align4(rank + 1)
+    smem_a_pitch = tile_h * aligned_rank_plus_1
+    smem_b_pitch = aligned_rank_plus_1 * tile_w
     return (tile_h * tile_w + smem_a_pitch + smem_b_pitch + 16) * 4
 
 
@@ -218,8 +225,8 @@ class MiningGraphSession:
             )
 
     def run_round(self, mining_job: MiningJob) -> bool:
-        self.key_A.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
-        self.key_B.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
+        self.key_A.random_(0, 256)
+        self.key_B.random_(0, 256)
         noise_gen(
             R=self.rank, num_threads=64,
             EAL=self.EAL, EAL_fp16=self.EAL_fp16,
@@ -234,7 +241,7 @@ class MiningGraphSession:
             self.a_rows, self.b_cols,
             self.jobs, self.jackpots, self.keys, self.hashes,
         )
-        if err != 0:
+        if err is not None and err != 0:
             raise RuntimeError(f"launch_mining_graph failed: cudaError {err}")
         synchronize_mining_graph(self.graph_state)
 
@@ -290,7 +297,7 @@ def main():
             if not args.gateway_tcp:
                 threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
                 if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30, logger=logger):
-                logger.error(f"Gateway socket {socket_path} never appeared")
+                    logger.error(f"Gateway socket {socket_path} never appeared")
                     return 1
                 logger.info(f"Gateway socket ready: {socket_path}")
             else:

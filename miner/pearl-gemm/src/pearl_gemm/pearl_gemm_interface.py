@@ -958,7 +958,7 @@ def launch_mining_graph(
         keys: Device pointer to BLAKE3 keys
         hashes: Device pointer to hash output
     """
-    pearl_gemm_cuda.launch_mining_graph(
+    return pearl_gemm_cuda.launch_mining_graph(
         state, a_noised, b_noised_t, a_rows, b_cols, jobs, jackpots, keys, hashes
     )
 
@@ -983,7 +983,7 @@ def update_mining_graph(
 
 def synchronize_mining_graph(state):
     """Synchronize and wait for mining graph execution to complete."""
-    pearl_gemm_cuda.synchronize_mining_graph(state)
+    return pearl_gemm_cuda.synchronize_mining_graph(state)
 
 
 def create_persistent_pipeline(
