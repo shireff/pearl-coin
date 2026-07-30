@@ -77,6 +77,17 @@
         dim3 block(BLOCK);
         dim3 grid(num_candidates);
 
+        // Opt-in to extended dynamic shared memory (required for > 48 KB).
+        // Without this, CUDA silently rejects any shared_mem_bytes > 48 KB
+        // with cudaErrorInvalidValue.
+        if (shared_mem_bytes > 48 * 1024) {
+            cudaFuncSetAttribute(
+                gpu_mining_kernel,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                static_cast<int>(shared_mem_bytes)
+            );
+        }
+
         gpu_mining_kernel<<<grid, block, shared_mem_bytes, stream>>>(
             a_noised, b_noised_t, a_rows_data, b_cols_data,
             jobs, jackpots, hashes, winner_flags,
