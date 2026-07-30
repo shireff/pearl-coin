@@ -201,6 +201,7 @@ def main():
     args = parse_args()
     logger = get_logger("miner_gpu")
 
+    client = None
     gateway_proc = None
     managed_gateway = False
 
@@ -267,7 +268,8 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
-        client.close()
+        if client is not None:
+            client.close()
         if managed_gateway and gateway_proc is not None:
             logger.info("Stopping managed gateway process...")
             gateway_proc.terminate()
@@ -275,8 +277,6 @@ def main():
                 gateway_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 gateway_proc.kill()
-        elif gateway_proc is not None:
-            stream_logs("gateway", gateway_proc)
 
 
 if __name__ == "__main__":

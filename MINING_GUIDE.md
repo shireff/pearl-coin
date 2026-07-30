@@ -167,6 +167,8 @@ python miner/miner_gpu.py \
 
 `miner_gpu.py` starts `pearl-gateway` as a background process, waits for the gateway socket to appear, then begins mining.
 
+> **Note:** When `miner_gpu.py` manages the gateway, it sets `PEARLD_RPC_URL`, `PEARLD_RPC_USER`, `PEARLD_RPC_PASSWORD`, and `PEARLD_MINING_ADDRESS` in the gateway's environment. You do not need to set them separately.
+
 If you prefer to run `pearl-gateway` manually in a separate terminal, use its documented command instead:
 
 ```bash
