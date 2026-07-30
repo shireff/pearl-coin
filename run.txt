@@ -1,14 +1,65 @@
-for rebuid
+# ═══════════════════════════════════════════════════════
+#  Pearl Miner — Quick Reference (vast.ai)
+#  Verified flow: RTX 4060 Ti, CUDA 13.0, torch 2.11.0
+# ═══════════════════════════════════════════════════════
+
+# ── FIRST TIME SETUP (run once on a new instance) ───────────────────
+
+# 1. Clone
+git clone https://github.com/shireff/pearl-cion.git ~/pearl-cion
 cd ~/pearl-cion
-source pearl-venv/bin/activate
+
+# 2. Activate the pre-installed venv (has torch 2.11.0+cu130)
+source /workspace/pearl-venv/bin/activate
+echo 'source /workspace/pearl-venv/bin/activate' >> ~/.bashrc
+
+# 3. Install miner packages (order matters)
+pip install loguru --quiet
+pip install -e miner/miner-utils --no-deps --quiet
+pip install -e py-pearl-mining --no-deps --quiet
+pip install -e miner/pearl-gateway --no-deps --quiet
+pip install -e miner/miner-base --no-deps --quiet
+
+# 4. Build pearld from source
+source "$HOME/.cargo/env"
+export PATH="/usr/local/go/bin:$PATH"
+git submodule update --init zk-pow xmss
+cd zk-pow/bindings/go && cargo build --release --no-default-features && cd ~/pearl-cion
+cd xmss && make && cd ~/pearl-cion
+mkdir -p bin && touch bin/sample-pearld.conf
+go build -tags xmss,zkpow -o bin/pearld ./node
+./bin/pearld --version   # should print: pearld version 1.1.6
+
+# 5. Configure and start pearld
+mkdir -p ~/.pearld
+cat > ~/.pearld/pearld.conf << 'EOF'
+[Application Options]
+rpcuser=rpcuser
+rpcpass=rpcpass
+rpclisten=127.0.0.1:44107
+txindex=1
+notls=1
+EOF
+./bin/pearld &
+sleep 10
+curl -s --user rpcuser:rpcpass \
+  --data-binary '{"jsonrpc":"1.0","method":"getblockcount","params":[]}' \
+  -H 'content-type:text/plain;' http://127.0.0.1:44107/
+
+# 6. Build pearl-gemm CUDA extension
+export CUDA_HOME=/usr/local/cuda
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
+export MAX_JOBS=4
+pip install -e miner/pearl-gemm-build-utils --quiet
 cd miner/pearl-gemm
+rm -rf build src/pearl_gemm_cuda*.so
 python setup.py build_ext --inplace
+cd ~/pearl-cion
+python -c "import pearl_gemm_cuda; print('BUILD OK')"
 
-for sure 
-find . -name "pearl_gemm_cuda*.so"
-
-
-for run
+# 7. Run miner
 python miner/miner_gpu.py \
   --rpc-url http://127.0.0.1:44107 \
   --rpc-user rpcuser \
@@ -17,51 +68,30 @@ python miner/miner_gpu.py \
   --noise-range 256 --P 8 --Q 8
 
 
-for venv
-cd ~/pearl-cion
-python3.12 -m venv pearl-venv
-source ~/pearl-cion/pearl-venv/bin/activate
-python -m pip install -U pip wheel setuptools
-pip install \
-torch==2.11.0+cu130 \
-torchvision==0.26.0+cu130 \
-torchaudio==2.11.0+cu130 \
---index-url https://download.pytorch.org/whl/cu130
-cd ~/pearl-cion/miner/pearl-gemm-build-utils
-pip install -e .
-cd ~/pearl-cion/miner/pearl-gemm
-python setup.py build_ext --inplace
-cd ~/pearl-cion/miner/pearl-gemm
-export PYTHONPATH=$PWD/src:$PYTHONPATH
-python -c "import pearl_gemm_cuda; print('BUILD OK')"
+# ── SESSION RESTART (after SSH reconnect) ────────────────────────────
 
-
-# ── Fix: Session closes and reopens — wrong venv activated ──────────────────
-# Problem: After SSH/tmux session restart, ~/pearl-cion/pearl-venv activates
-#          automatically but torch is NOT installed there.
-#          Torch lives in /workspace/pearl-venv — use that one instead.
-
-# Step 1: Activate the correct venv (has torch + pearl_gemm)
 source /workspace/pearl-venv/bin/activate
-
-# Step 2: Install missing miner packages (only needed once after new session)
-pip install loguru --quiet
-pip install -e ~/pearl-cion/miner/miner-utils --no-deps --quiet
-pip install -e ~/pearl-cion/py-pearl-mining --no-deps --quiet
-pip install -e ~/pearl-cion/miner/pearl-gateway --no-deps --quiet
-pip install -e ~/pearl-cion/miner/miner-base --no-deps --quiet
-
-# Step 3: Verify
-python -c "import torch; print('torch OK:', torch.__version__, torch.version.cuda)"
-python -c "from miner_base.gateway_client import MiningClient; print('miner_base OK')"
-
-# Step 4: Make fix permanent — add to ~/.bashrc so every new session uses correct venv
-echo 'source /workspace/pearl-venv/bin/activate' >> ~/.bashrc
-
-# Step 5: Run miner
 cd ~/pearl-cion
+kill $(pgrep -f "pearl_gateway") 2>/dev/null; sleep 1
+pgrep -x pearld || ./bin/pearld &
+sleep 5
+git pull
 python miner/miner_gpu.py \
   --rpc-url http://127.0.0.1:44107 \
   --rpc-user rpcuser \
   --rpc-password rpcpass \
-  --mining-address prl1pmt5e954cpepqmvnpm8sfywmjhvupjpdd5trtkdw8jca86auuvlls45s2x8
+  --mining-address <YOUR_WALLET_ADDRESS> \
+  --noise-range 256 --P 8 --Q 8
+
+
+# ── REBUILD pearl-gemm only ───────────────────────────────────────────
+
+source /workspace/pearl-venv/bin/activate
+export CUDA_HOME=/usr/local/cuda
+export TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1
+export MAX_JOBS=4
+cd ~/pearl-cion/miner/pearl-gemm
+rm -rf build src/pearl_gemm_cuda*.so
+python setup.py build_ext --inplace
+cd ~/pearl-cion
+find . -name "pearl_gemm_cuda*.so"

@@ -9,6 +9,31 @@
 [![Rust CI](https://github.com/pearl-research-labs/pearl/actions/workflows/rust_ci.yml/badge.svg)](https://github.com/pearl-research-labs/pearl/actions/workflows/rust_ci.yml)
 [![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
 
+<details>
+<summary><b>Table of Contents</b> (<a href="#repository-layout">expand all</a>)</summary>
+
+| Section | Page |
+|---------|------|
+| [Mining Guide](MINING_GUIDE.md) | Complete setup &amp; run guide |
+| [Repository Layout](#repository-layout) | Directory structure overview |
+| [Install (prebuilt binaries)](#install-prebuilt-binaries) | Quick install via script |
+| [Prerequisites](#prerequisites) | Required tools &amp; versions |
+| [Building](#building) | Build from source with `task` |
+| [Running a Node and vLLM Miner](#running-a-node-and-vllm-miner) | Full stack setup |
+| &nbsp;&nbsp;• [Create a wallet](#1-create-a-wallet-and-get-a-mining-address) | Generate mining address |
+| &nbsp;&nbsp;• [Start the node](#2-start-the-node) | Run `pearld` |
+| &nbsp;&nbsp;• [Start the vLLM miner](#3-start-the-vllm-miner) | Run `pearl-gateway` + vLLM |
+| [Testing](#testing) | Run test suites |
+| [Formatting and Linting](#formatting-and-linting) | Code style tools |
+| [Contributing](#contributing) | How to contribute |
+| [Security](#security) | Security policy |
+| [License](#license) | ISC license |
+| [Acknowledgments](#acknowledgments) | Upstream projects |
+
+</details>
+
+---
+
 Pearl is an L1 blockchain based on the **Proof-of-Useful-Work** protocol, where mining is done as a by-product of arbitrary matrix multiplication, as proposed [in this paper](https://arxiv.org/abs/2504.09971).
 
 This monorepo contains the full node, wallet, SPV light client, ZK proving
@@ -42,13 +67,13 @@ For a complete step-by-step guide to setting up and running the Pearl miner, see
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pearl-research-labs/pearl/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/shireff/pearl-cion/main/install.sh | sh
 ```
 
 Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/pearl-research-labs/pearl/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/shireff/pearl-cion/main/install.ps1 | iex
 ```
 
 Installs `pearld`, `prlctl`, `oyster`, and `oystercli` with localhost-only mainnet defaults and
