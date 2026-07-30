@@ -23,11 +23,13 @@ pearl-gateway                ← builds ZK proof, submits block to pearld
 ```
 
 The GPU executes:
+
 - INT8 matrix multiply via WGMMA Tensor Core instructions (SM90/SM120)
 - BLAKE3 PoW difficulty check inside the CUDA kernel
 - Noise generation and denoising as part of the same kernel pipeline
 
 The CPU only:
+
 - Waits for a CUDA event signal
 - Reads `host_signal_header_pinned` when a block is found
 - Builds the `PlainProof` and sends it through `pearl-gateway` to `pearld`
@@ -38,25 +40,25 @@ The CPU only:
 
 ### Hardware
 
-| Requirement | Details |
-|-------------|---------|
-| GPU | NVIDIA with CUDA — **sm_90a** (H100/H200) or **sm_120** (RTX 5090) |
-| RAM | 16 GB minimum, 32 GB recommended |
-| Storage | 50 GB free space |
-| OS | Ubuntu 22.04+ (recommended) or Windows 11 |
+| Requirement | Details                                                            |
+| ----------- | ------------------------------------------------------------------ |
+| GPU         | NVIDIA with CUDA — **sm_90a** (H100/H200) or **sm_120** (RTX 5090) |
+| RAM         | 16 GB minimum, 32 GB recommended                                   |
+| Storage     | 50 GB free space                                                   |
+| OS          | Ubuntu 22.04+ (recommended) or Windows 11                          |
 
 ### Software
 
-| Tool | Required Version | Source |
-|------|----------------|--------|
-| Python | **3.12 exactly** | `pyproject.toml`: `requires-python = "==3.12.*"` |
-| uv | Latest | workspace package manager |
-| CUDA Toolkit | **13.0** | `pyproject.toml`: `cuda-bindings>=13.0,<13.1` |
-| Rust | Latest stable | required for `py-pearl-mining`, `zk-pow` |
-| Go | 1.26+ | required for `pearld`, `oyster`, `prlctl` |
-| Task | Latest | `Taskfile.yml` shortcuts |
-| Docker | 20.x+ | optional — production container path |
-| Git | 2.x | cloning the repository |
+| Tool         | Required Version | Source                                           |
+| ------------ | ---------------- | ------------------------------------------------ |
+| Python       | **3.12 exactly** | `pyproject.toml`: `requires-python = "==3.12.*"` |
+| uv           | Latest           | workspace package manager                        |
+| CUDA Toolkit | **13.0**         | `pyproject.toml`: `cuda-bindings>=13.0,<13.1`    |
+| Rust         | Latest stable    | required for `py-pearl-mining`, `zk-pow`         |
+| Go           | 1.26+            | required for `pearld`, `oyster`, `prlctl`        |
+| Task         | Latest           | `Taskfile.yml` shortcuts                         |
+| Docker       | 20.x+            | optional — production container path             |
+| Git          | 2.x              | cloning the repository                           |
 
 ---
 
@@ -67,24 +69,29 @@ The CPU only:
 #### Linux / macOS
 
 1. Clone the repo and initialize submodules:
+
 ```bash
 git clone https://github.com/shireff/pearl-cion.git
-cd pearl
+cd pearl-cion
 git submodule update --init --recursive
 ```
 
 2. Install CUDA Toolkit 13.0:
+
 ```bash
 # Install the CUDA 13.0 toolkit for your distro
 nvcc --version
 # expected output includes "release 13.0"
 ```
+
 If CUDA is installed in a nonstandard path, set:
+
 ```bash
 export CUDA_HOME=/usr/local/cuda-13.0
 ```
 
 3. Install the required tools:
+
 ```bash
 # uv package manager
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -98,15 +105,19 @@ source ~/.cargo/env
 ```
 
 4. Build the Python workspace and CUDA extension:
+
 ```bash
 uv sync --package vllm-miner
 ```
 
 5. Build the blockchain binaries if you need the full node locally:
+
 ```bash
 task build:blockchain
 ```
+
 If `task` is not installed, build manually:
+
 ```bash
 cd zk-pow
 cargo run --release --no-default-features --bin build_cache src/circuit/v2_cache.bin src/v1/v1_cache.bin
@@ -118,6 +129,7 @@ CGO_ENABLED=0 go build -o bin/oystercli ./wallet/cmd/oystercli
 ```
 
 6. If the `pearl-gemm` build fails, retry directly from `miner/pearl-gemm`:
+
 ```bash
 cd miner/pearl-gemm
 bash build.sh --no-pull
@@ -126,6 +138,7 @@ bash build.sh --no-pull
 #### Windows
 
 1. Clone the repo and initialize submodules:
+
 ```powershell
 git clone https://github.com/shireff/pearl-cion.git
 cd pearl-cion
@@ -138,11 +151,13 @@ git submodule update --init --recursive
 4. Verify Python 3.12 is available and that your environment can run `python`.
 
 5. Build the Python workspace:
+
 ```powershell
 uv sync --package vllm-miner
 ```
 
 6. If CUDA kernel build fails, run from PowerShell:
+
 ```powershell
 cd miner/pearl-gemm
 bash build.sh --no-pull
@@ -153,17 +168,20 @@ bash build.sh --no-pull
 ### 2. Existing checkout on a machine that already has the repo
 
 From the repo root:
+
 ```bash
 git pull origin main
 git submodule update --init --recursive
 ```
 
 Then refresh the Python workspace:
+
 ```bash
 uv sync --package vllm-miner
 ```
 
 If you changed CUDA kernel or model plugin code, rebuild the extension:
+
 ```bash
 cd miner/pearl-gemm
 bash build.sh --no-pull
@@ -172,16 +190,19 @@ bash build.sh --no-pull
 ### 3. If the repo is already built and you only want to run it
 
 From the repo root, start the full node:
+
 ```bash
 bin/pearld --rpcuser=rpcuser --rpcpass=rpcpass --rpclisten=0.0.0.0:44107 --miningaddr=<your-mining-address> --txindex
 ```
 
 Start the gateway in another terminal:
+
 ```bash
 pearl-gateway start
 ```
 
 Start the miner in another terminal:
+
 ```bash
 uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
   --host 0.0.0.0 \
@@ -223,18 +244,21 @@ CGO_ENABLED=0 go build -o bin/oystercli ./wallet/cmd/oystercli
 ### Run the full mining stack
 
 **Terminal 1 — Start the full node:**
+
 ```bash
 cd "pearl-cion"
 ./bin/pearld --rpcuser=rpcuser --rpcpass=rpcpass --rpclisten=0.0.0.0:44107 --miningaddr=<your-mining-address> --txindex
 ```
 
 **Terminal 2 — Start the gateway:**
+
 ```bash
 cd "pearl-cion"
 pearl-gateway start
 ```
 
 **Terminal 3 — Start the miner (vLLM with Pearl plugin):**
+
 ```bash
 cd "pearl-cion"
 uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
@@ -282,6 +306,7 @@ git submodule update --init --recursive
 Download from: https://developer.nvidia.com/cuda-13-0-download-archive
 
 **Linux:**
+
 ```bash
 # Follow the network installer instructions for your distro.
 # After install, verify:
@@ -290,6 +315,7 @@ nvcc --version
 ```
 
 **Windows:**
+
 - Select: Windows → x86_64 → exe (local)
 - Install to: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0`
 - Add to PATH: `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin`
@@ -378,6 +404,7 @@ uv sync --package vllm-miner
 ```
 
 This automatically:
+
 - Installs Python 3.12 via uv
 - Installs `torch==2.11.0` from the `cu130` PyTorch index (defined in `pyproject.toml`)
 - Installs `vllm==0.20.2`
@@ -387,12 +414,14 @@ This automatically:
 > as configured in `pyproject.toml`. Using the wrong PyTorch build will break the CUDA kernels.
 
 If the CUDA kernel build fails:
+
 ```bash
 export PEARL_GEMM_FORCE_BUILD=TRUE
 uv sync --package vllm-miner
 ```
 
 **Alternative: build everything (all workspace packages):**
+
 ```bash
 uv sync --all-packages
 ```
@@ -400,12 +429,14 @@ uv sync --all-packages
 ### Step 9 — Create a wallet and get a mining address
 
 **Interactive (easiest):**
+
 ```bash
 bin/oystercli
 # Walk through: Create New Wallet → save seed phrase → Receive → copy address
 ```
 
 **Manual:**
+
 ```bash
 # Create the wallet
 bin/oyster --create
@@ -432,6 +463,7 @@ bin/pearld \
 ```
 
 Wait for it to sync. Verify:
+
 ```bash
 bin/prlctl getinfo
 # Look for "blocks" count increasing
@@ -439,11 +471,11 @@ bin/prlctl getinfo
 
 Network port reference:
 
-| Network  | pearld RPC | P2P   | oyster RPC |
-|----------|-----------|-------|-----------|
-| Mainnet  | 44107     | 44108 | 44207     |
-| Testnet  | 44109     | 44110 | 44209     |
-| Simnet   | 18556     | 18555 | 18554     |
+| Network | pearld RPC | P2P   | oyster RPC |
+| ------- | ---------- | ----- | ---------- |
+| Mainnet | 44107      | 44108 | 44207      |
+| Testnet | 44109      | 44110 | 44209      |
+| Simnet  | 18556      | 18555 | 18554      |
 
 ### Step 11 — Set environment variables
 
@@ -476,6 +508,7 @@ pearl-gateway start
 ```
 
 Wait until the socket appears:
+
 ```bash
 # Linux/macOS — verify socket is ready:
 ls -la /tmp/pearlgw.sock
@@ -573,6 +606,7 @@ docker run --rm -it --gpus all \
 ```
 
 What `entrypoint.sh` does inside the container (source: `miner/vllm-miner/entrypoint.sh`):
+
 1. Auto-detects GPU count → sets `CUDA_VISIBLE_DEVICES`
 2. Runs `pearl-gateway start` in the background
 3. Polls `/tmp/pearlgw.sock` every second for up to 30 seconds
@@ -580,6 +614,7 @@ What `entrypoint.sh` does inside the container (source: `miner/vllm-miner/entryp
 5. Runs `exec vllm serve <all your args>`
 
 Expected output when everything works:
+
 ```
 Auto-detected 1 GPUs, setting CUDA_VISIBLE_DEVICES=0
 Starting pearl-gateway...
@@ -594,24 +629,28 @@ INFO:     model loaded
 ## Verifying Mining Is Active
 
 ### Check GPU utilization
+
 ```bash
 nvidia-smi
 # GPU-Util % should rise when vllm processes requests
 ```
 
 ### Check gateway metrics
+
 ```bash
 curl http://127.0.0.1:9109/metrics
 # Returns Prometheus metrics including block submission counts
 ```
 
 ### Check node connectivity
+
 ```bash
 prlctl getinfo
 # Look for "blocks" and "connections" > 0
 ```
 
 ### Check vllm logs
+
 ```
 INFO: pearl mining plugin registered        ← plugin loaded
 INFO: noisy_gemm activated for layer ...    ← GPU mining active
@@ -641,11 +680,13 @@ nsys profile \
 After the process runs for 30 seconds, press `Ctrl+C` to stop and generate the report.
 
 Open the report:
+
 ```bash
 nsys-ui profile_report.qdrep
 ```
 
 **What to look for:**
+
 - Long gaps between GPU kernels → CPU-GPU sync bottleneck
 - CPU time dominating → Python overhead or rate limiting
 - Memory copies between CPU and GPU → unnecessary `.cpu()` calls
@@ -672,34 +713,38 @@ ncu --set full \
 Stop after 30 seconds with `Ctrl+C`.
 
 Open the report:
+
 ```bash
 ncu-ui ncu_report.ncu-rep
 ```
 
 **Key metrics to check:**
 
-| Metric | What it tells you | Good value |
-|--------|-------------------|------------|
-| `sm_efficiency` | GPU SM utilization | > 60% |
-| `achieved_occupancy` | Warp occupancy on SMs | > 50% |
-| `dram_throughput` | Memory bandwidth usage | > 50% of peak |
-| `l1tex_cache_hit_rate` | L1/L2 cache efficiency | > 80% |
-| `smsp__warps_active.avg.pct_of_peak_sustained` | Active warps | > 70% |
-| `gpu__time_duration` | Kernel execution time | Lower is better |
-| `register_per_thread` | Registers per thread | < 255 (limit) |
-| `shared_mem_usage` | Shared memory usage | < 64 KB (limit) |
+| Metric                                         | What it tells you      | Good value      |
+| ---------------------------------------------- | ---------------------- | --------------- |
+| `sm_efficiency`                                | GPU SM utilization     | > 60%           |
+| `achieved_occupancy`                           | Warp occupancy on SMs  | > 50%           |
+| `dram_throughput`                              | Memory bandwidth usage | > 50% of peak   |
+| `l1tex_cache_hit_rate`                         | L1/L2 cache efficiency | > 80%           |
+| `smsp__warps_active.avg.pct_of_peak_sustained` | Active warps           | > 70%           |
+| `gpu__time_duration`                           | Kernel execution time  | Lower is better |
+| `register_per_thread`                          | Registers per thread   | < 255 (limit)   |
+| `shared_mem_usage`                             | Shared memory usage    | < 64 KB (limit) |
 
 **If occupancy is low:**
+
 - Increase `tile_size_m` or `tile_size_n` in `settings.py`
 - Decrease `noise_rank` to reduce register pressure
 - Check if `pipeline_stages` is too high or too low
 
 **If memory is the bottleneck:**
+
 - Check `dram_throughput` vs GPU memory bandwidth
 - Optimize `cols_pattern` density (more columns = more compute per memory access)
 - Increase `tile_size_k` to process more data per memory load
 
 **If register pressure is high:**
+
 - `register_per_thread` near 255
 - Reduce `noise_rank` or `tile_size_m`
 - The compiler may be spilling registers to local memory
@@ -724,12 +769,14 @@ nvidia-smi dmon -s uctpmv -d 1
 ```
 
 **What to look for:**
+
 - GPU utilization < 80% → GPU is waiting for CPU or kernel is too small
 - Memory utilization near 100% → OOM risk or memory-bound kernel
 - Power draw stable at max → GPU is fully utilized
 - Temperature throttling → reduce power limit or improve cooling
 
 **Quick check during mining:**
+
 ```bash
 watch -n 1 nvidia-smi
 ```
@@ -757,6 +804,7 @@ def profile_kernel(name: str, fn, *args, **kwargs):
 ```
 
 Usage in `pearl_gemm_noisy`:
+
 ```python
 # Profile each kernel individually
 profile_kernel("tensor_hash_A", run_tensor_hash, A.to(torch.uint8), key_tensor, A_tensor_hash, scratchpad)
@@ -767,6 +815,7 @@ profile_kernel("noisy_gemm", noisy_gemm, A=A, B=B, ...)
 ```
 
 **What to look for:**
+
 - Which kernel takes the most time → that's your bottleneck
 - If `noisy_gemm` dominates → kernel is compute-bound, optimize tile sizes
 - If `tensor_hash` dominates → hash computation is the bottleneck, increase `idxs_per_col`
@@ -804,6 +853,7 @@ ncu-ui ncu_report.ncu-rep
 ## Performance Settings
 
 ### Single GPU
+
 ```bash
 export CUDA_VISIBLE_DEVICES=0
 export CUDA_LAUNCH_BLOCKING=0
@@ -811,6 +861,7 @@ export CUDA_CACHE_DISABLE=0
 ```
 
 ### Multi-GPU (tensor parallelism)
+
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
@@ -819,6 +870,7 @@ vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
 ```
 
 ### System-level (Linux)
+
 ```bash
 ulimit -n 65536
 sudo nvidia-smi -pm 1
@@ -829,15 +881,15 @@ sudo nvidia-smi -pl <max-power-watts>
 
 ## Port Reference
 
-| Port | Service | Description |
-|------|---------|-------------|
-| 44107 | pearld RPC | Full node JSON-RPC |
-| 44108 | pearld P2P | Network peers |
-| 44207 | oyster RPC | Wallet daemon |
-| 8000 | vllm serve | LLM inference API |
-| 8337 | pearl-gateway | Mining RPC (TCP fallback) |
-| 8339 | pearl-gateway | Secondary port |
-| 9109 | pearl-gateway | Prometheus metrics |
+| Port                | Service       | Description                  |
+| ------------------- | ------------- | ---------------------------- |
+| 44107               | pearld RPC    | Full node JSON-RPC           |
+| 44108               | pearld P2P    | Network peers                |
+| 44207               | oyster RPC    | Wallet daemon                |
+| 8000                | vllm serve    | LLM inference API            |
+| 8337                | pearl-gateway | Mining RPC (TCP fallback)    |
+| 8339                | pearl-gateway | Secondary port               |
+| 9109                | pearl-gateway | Prometheus metrics           |
 | `/tmp/pearlgw.sock` | pearl-gateway | Unix Domain Socket (default) |
 
 ---
@@ -845,6 +897,7 @@ sudo nvidia-smi -pl <max-power-watts>
 ## Troubleshooting
 
 ### CUDA kernel build fails
+
 ```bash
 export PEARL_GEMM_FORCE_BUILD=TRUE
 uv sync --package vllm-miner
@@ -852,6 +905,7 @@ uv sync --package vllm-miner
 ```
 
 ### pearl-gateway socket never appears
+
 ```bash
 # Check if gateway is running:
 ps aux | grep pearl-gateway
@@ -865,6 +919,7 @@ pearl-gateway start
 ```
 
 ### GPU not detected
+
 ```bash
 nvidia-smi                                                      # must work
 nvcc --version                                                  # must show 13.x
@@ -872,6 +927,7 @@ python -c "import torch; print(torch.cuda.is_available())"     # must print True
 ```
 
 ### pearld not connecting
+
 ```bash
 # Check pearld is running:
 prlctl getinfo
@@ -882,6 +938,7 @@ cat ~/.pearld/pearld.conf          # Linux
 ```
 
 ### "pearl mining plugin not registered" in vllm logs
+
 ```bash
 # Verify the package is installed:
 uv run python -c "import vllm_miner; print('OK')"
@@ -891,6 +948,7 @@ uv sync --package vllm-miner
 ```
 
 ### Wrong PyTorch CUDA version
+
 ```bash
 # Check what version is installed:
 python -c "import torch; print(torch.version.cuda)"
