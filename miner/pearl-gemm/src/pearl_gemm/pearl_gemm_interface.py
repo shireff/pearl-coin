@@ -862,9 +862,9 @@ def _abstract_run_tensor_hash(
 def gpu_jackpot_hash(
     jackpots,     # (num_candidates, num_combos, 16) uint32
     keys,         # (num_candidates, 8) uint32
-    hashes,       # (num_candidates, num_combos, 8) uint32
-    num_candidates: int,
-    num_combos: int,
+    hashes=None,  # (num_candidates, num_combos, 8) uint32
+    num_candidates: int = None,
+    num_combos: int = None,
     stream=None,
 ):
     """Compute BLAKE3 keyed hash of jackpot arrays on GPU.
@@ -872,7 +872,7 @@ def gpu_jackpot_hash(
     Args:
         jackpots: (num_candidates, num_combos, 16) uint32 tensor
         keys: (num_candidates, 8) uint32 tensor
-        hashes: (num_candidates, num_combos, 8) uint32 output tensor
+        hashes: (optional) output tensor for old wrapper signature
         num_candidates: Number of mining candidates
         num_combos: Number of combinations per candidate
         stream: Optional CUDA stream
@@ -880,9 +880,19 @@ def gpu_jackpot_hash(
     Returns:
         hashes tensor with BLAKE3(keyed) hash of each jackpot
     """
-    if stream is not None:
-        return pearl_gemm_cuda.gpu_jackpot_hash(jackpots, keys, hashes, num_candidates, num_combos, stream)
-    return pearl_gemm_cuda.gpu_jackpot_hash(jackpots, keys, hashes, num_candidates, num_combos)
+    if hashes is None:
+        return pearl_gemm_cuda.gpu_jackpot_hash(jackpots, keys)
+
+    try:
+        if stream is not None:
+            return pearl_gemm_cuda.gpu_jackpot_hash(
+                jackpots, keys, hashes, num_candidates, num_combos, stream
+            )
+        return pearl_gemm_cuda.gpu_jackpot_hash(
+            jackpots, keys, hashes, num_candidates, num_combos
+        )
+    except TypeError:
+        return pearl_gemm_cuda.gpu_jackpot_hash(jackpots, keys)
 
 
 def create_mining_graph(
