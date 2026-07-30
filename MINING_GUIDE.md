@@ -97,11 +97,19 @@ bash build.sh --no-pull
 If you modify any `.cu` or `.cpp` source file and need to rebuild:
 
 ```bash
+cd ~/pearl-cion
+source pearl-venv/bin/activate
 cd miner/pearl-gemm
-pip install -e .
+python setup.py build_ext --inplace
 ```
 
-This reinstalls the extension in editable mode and recompiles only the changed files.
+Verify the build succeeded:
+
+```bash
+find . -name "pearl_gemm_cuda*.so"
+```
+
+Expected output: `./src/pearl_gemm_cuda.cpython-312-x86_64-linux-gnu.so`
 
 ## Wallet Setup
 
