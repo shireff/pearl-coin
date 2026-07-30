@@ -114,14 +114,17 @@ def stream_logs(name, proc):
         print(f"[{name}] {line}", end="", flush=True)
 
 
-def wait_for_gateway_socket(proc, socket_path, timeout=30):
+def wait_for_gateway_socket(proc, socket_path, timeout=30, logger=None):
     """Wait for gateway socket while streaming logs and checking process health."""
     start = time.time()
     while time.time() - start < timeout:
         if os.path.exists(socket_path):
             return True
         if proc.poll() is not None:
-            logger.error("Managed pearl-gateway exited early with code %s", proc.returncode)
+            if logger is not None:
+                logger.error("Managed pearl-gateway exited early with code %s", proc.returncode)
+            else:
+                print(f"Managed pearl-gateway exited early with code {proc.returncode}")
             if proc.stdout:
                 remaining = proc.stdout.read()
                 if remaining:
@@ -244,7 +247,7 @@ def main():
                 log_thread = threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True)
                 log_thread.start()
 
-                if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30):
+                if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30, logger=logger):
                     logger.error("Gateway socket %s never appeared", socket_path)
                     return 1
                 logger.info("Gateway socket ready: %s", socket_path)
