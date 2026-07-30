@@ -18,6 +18,9 @@ override-dependencies = [
   "cuda-python>=13.0,<13.1",
 ]
 
+[tool.uv.extra-build-dependencies]
+pearl-gemm = ["pearl_gemm_build_utils"]
+
 # Workspace sources - these apply globally to all members
 [tool.uv.sources]
 miner-utils = {workspace = true}
