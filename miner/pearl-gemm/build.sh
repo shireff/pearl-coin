@@ -25,12 +25,12 @@ done
 
 if [ -z "${CUDA_HOME:-}" ]; then
     TORCH_CUDA="$(python -c 'import torch; print(getattr(torch.version, "cuda", ""))' 2>/dev/null || true)"
-    candidates=()
+    candidates=""
     if [ -n "${TORCH_CUDA:-}" ]; then
-        candidates+=( "/usr/local/cuda-${TORCH_CUDA}" "/usr/local/cuda-${TORCH_CUDA%.*}" )
+        candidates="/usr/local/cuda-${TORCH_CUDA} /usr/local/cuda-${TORCH_CUDA%.*}"
     fi
-    candidates+=( /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-* )
-    for candidate in "${candidates[@]}"; do
+    candidates="$candidates /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-*"
+    for candidate in $candidates; do
         if [ -x "$candidate/bin/nvcc" ]; then
             CUDA_HOME="$candidate"
             break
