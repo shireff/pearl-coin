@@ -1,48 +1,96 @@
 # Pearl Mining — Setup Guide
 
-> Every command in this guide is verified against the current repository source.  
-> Obsolete instructions (vLLM plugin path, Docker vllm-miner image, `noisy_gemm` vLLM hooks) have been removed because the `vllm-miner` package directory is not present in this checkout.  
-> **Single source of truth**: the code in `miner/`, `node/`, `wallet/`, and `miner/pearl-gateway/`.
+This guide uses the current repository source as the single source of truth.  
+Obsolete paths (VLLM plugin, `vllm-miner` Docker image, `noisy_gemm` vLLM hooks) have been removed because the `vllm-miner` package directory is absent from this checkout.
 
 ## How Mining Works
 
 ```
 pearld (full node)
-    ↓ JSON-RPC HTTPS (port 44107)
+    ↓ JSON-RPC (port 44107)
 pearl-gateway start            ← fetches block template, distributes work
     ↓ Unix socket /tmp/pearlgw.sock (or TCP 8337)
 miner_gpu.py                   ← standalone GPU miner
     ↓ CUDA kernels (pearl_gemm)
 gpu_mine_batch / gpu_jackpot_hash
-    ↓
-Miners submit proofs back through pearl-gateway → pearld
+    ↓ proofs submitted via pearl-gateway → pearld
 ```
 
-The GPU miner connects directly to `pearl-gateway` over a local socket.  
-`pearl-gateway` handles all communication with `pearld`.  
-`miner_gpu.py` does **not** connect to `pearld` and does **not** require VLLM.
+Three components must run in order:
+1. **pearld** — the full node
+2. **pearl-gateway** — the bridge between the node and miners
+3. **miner_gpu.py** — the standalone GPU miner
+
+`miner_gpu.py` does **not** connect to `pearld` directly. It connects to `pearl-gateway` over a local Unix socket or TCP.
 
 ## Prerequisites
 
 ### Hardware
 
-| Requirement | Details                                                            |
-| ----------- | ------------------------------------------------------------------ |
+| Requirement | Details |
+| ----------- | ------- |
 | GPU         | NVIDIA with CUDA — **sm_90a** (H100/H200) or **sm_120** (RTX 5090) |
-| RAM         | 16 GB minimum, 32 GB recommended                                   |
-| Storage     | 50 GB free space                                                   |
-| OS          | Ubuntu 22.04+ (recommended) or Windows 11                          |
+| RAM         | 16 GB minimum, 32 GB recommended |
+| Storage     | 50 GB free space |
+| OS          | Ubuntu 22.04+ (recommended) or Windows 11 |
 
 ### Software
 
-| Tool         | Required Version | Source                                                  |
-| ------------ | ---------------- | ------------------------------------------------------- |
-| Python       | **3.12.x**       | https://www.python.org/downloads/release/python-3120/   |
-| uv           | Latest           | https://astral.sh/uv/                                   |
+| Tool         | Required Version | Source |
+| ------------ | ---------------- | ------ |
+| Python       | **3.12.x**       | https://www.python.org/downloads/release/python-3120/ |
+| uv           | Latest           | https://astral.sh/uv/ |
 | CUDA Toolkit | **13.0**         | https://developer.nvidia.com/cuda-13-0-download-archive |
-| Rust         | stable           | https://rustup.rs/                                      |
-| Go           | 1.26+            | https://go.dev/dl/                                      |
-| Git          | 2.x              | https://git-scm.com/downloads                           |
+| Rust         | stable           | https://rustup.rs/ |
+| Go           | 1.26+            | https://go.dev/dl/ |
+| Git          | 2.x              | https://git-scm.com/downloads |
+
+## Build
+
+### Clone and initialize
+
+```bash
+git clone https://github.com/shireff/pearl-cion.git
+cd pearl
+git submodule update --init --recursive
+```
+
+### Install Python dependencies
+
+```bash
+uv sync
+```
+
+This installs `miner-base`, `pearl-gateway`, `pearl-gemm`, `miner-utils`, and `py-pearl-mining`.
+
+> **Note:** `vllm-miner` is listed in `pyproject.toml` as a workspace member, but its directory is absent from this checkout. If `uv sync` fails, install only the available packages or restore the missing package.
+
+### Build blockchain binaries
+
+```bash
+task build:blockchain
+```
+
+If `task` is not installed:
+
+```bash
+cd zk-pow
+cargo run --release --no-default-features --bin build_cache \
+  src/circuit/v2_cache.bin src/v1/v1_cache.bin
+cd ..
+
+go build -tags xmss,zkpow -o bin/pearld    ./node
+go build -tags xmss,zkpow -o bin/prlctl   ./node/cmd/prlctl
+go build -tags xmss,zkpow -o bin/oyster   ./wallet
+CGO_ENABLED=0 go build   -o bin/oystercli ./wallet/cmd/oystercli
+```
+
+### Build CUDA kernels
+
+```bash
+cd miner/pearl-gemm
+bash build.sh --no-pull
+```
 
 ## Wallet Setup
 
@@ -78,67 +126,13 @@ Save the printed address. You will need it for `pearld --miningaddr` and for the
 > **Note:** `--wallet` connects to the wallet RPC server on port 44207 (mainnet).  
 > If your node is on a non-mainnet network, add the matching network flag (`--testnet`, `--simnet`, etc.).
 
-## Build
-
-### Clone and initialize
-
-```bash
-git clone https://github.com/shireff/pearl-cion.git
-cd pearl
-git submodule update --init --recursive
-```
-
-### Install Python dependencies
-
-```bash
-uv sync
-```
-
-This installs the workspace packages (`miner-base`, `pearl-gateway`, `pearl-gemm`, `miner-utils`, `py-pearl-mining`) and their dependencies.
-
-> **Requires user input:** `vllm-miner` is listed in `pyproject.toml` as a workspace member but its directory is not present in this checkout. If `uv sync` fails due to the missing package, install only the required dependencies manually or restore the missing package.
-
-### Build blockchain binaries
-
-```bash
-task build:blockchain
-```
-
-If `task` is not installed:
-
-```bash
-cd zk-pow
-cargo run --release --no-default-features --bin build_cache \
-  src/circuit/v2_cache.bin src/v1/v1_cache.bin
-cd ..
-
-go build -tags xmss,zkpow -o bin/pearld    ./node
-go build -tags xmss,zkpow -o bin/prlctl   ./node/cmd/prlctl
-go build -tags xmss,zkpow -o bin/oyster   ./wallet
-CGO_ENABLED=0 go build   -o bin/oystercli ./wallet/cmd/oystercli
-```
-
-### Build CUDA kernels
-
-```bash
-cd miner/pearl-gemm
-bash build.sh --no-pull
-```
-
 ## Running the Stack
 
-The stack consists of three components that must be started **in order**:
+The stack must be started **in order**.
 
-1. `pearld` — the full node
-2. `pearl-gateway` — the bridge between the node and miners
-3. `miner_gpu.py` — the GPU miner
+### 1. Start pearld
 
-Alternatively, `run_mining.py` can launch all three automatically (see Appendix).
-
-### Terminal 1 — Start pearld
-
-The gateway connects to `pearld` over plain HTTP by default.  
-You must start `pearld` with TLS disabled or configure the gateway for HTTPS.
+Start the full node with TLS disabled (the gateway connects over plain HTTP by default):
 
 ```bash
 ./bin/pearld \
@@ -159,7 +153,7 @@ Verify it is running:
 
 > **Common failure:** If `pearl-gateway` logs `Failed to connect to Pearl node` or returns HTTP 401 / TLS errors, confirm that `pearld` was started with `--notls` and that the `rpcuser` / `rpcpass` match on both sides.
 
-### Terminal 2 — Start pearl-gateway
+### 2. Configure and start pearl-gateway
 
 Set the environment variables that tell the gateway how to reach `pearld`:
 
@@ -171,7 +165,7 @@ export PEARLD_MINING_ADDRESS="<YOUR_WALLET_ADDRESS>"
 export PEARL_LOG_LEVEL="INFO"
 ```
 
-Then start the gateway:
+Start the gateway:
 
 ```bash
 pearl-gateway start
@@ -187,7 +181,7 @@ ls -la /tmp/pearlgw.sock
 # Set MINER_RPC_TRANSPORT=tcp and check port 8337 is listening
 ```
 
-### Terminal 3 — Start the GPU miner
+### 3. Start the miner
 
 Run the standalone GPU miner:
 
@@ -195,22 +189,36 @@ Run the standalone GPU miner:
 python miner/miner_gpu.py
 ```
 
-Or with `uv` (recommended if you use `uv` for the workspace):
+Or with `uv`:
 
 ```bash
 uv run python miner/miner_gpu.py
 ```
 
-The miner reads its configuration from two sources:
+The miner accepts CLI overrides for the gateway connection and mining parameters:
 
-- **Gateway connection** — `MinerRpcConfig` (environment prefix `MINER_RPC_`)
-- **Mining parameters** — `MinerSettings` (environment prefix `miner_`)
+```bash
+python miner/miner_gpu.py \
+  --gateway-socket /tmp/pearlgw.sock \
+  --noise-rank 256 \
+  --tile-m 256 \
+  --tile-n 1024
+```
 
-Defaults are sane: UDS at `/tmp/pearlgw.sock`, `noise_rank=256`, `tile_size_m=256`, `tile_size_n=1024`.
+For TCP fallback (e.g., Windows or socket conflicts):
+
+```bash
+python miner/miner_gpu.py \
+  --gateway-tcp \
+  --gateway-host localhost \
+  --gateway-port 8337
+```
 
 ## Environment Variables
 
-### pearl-gateway (Terminal 2)
+### pearl-gateway
+
+Set these in the terminal where you start `pearl-gateway`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -224,23 +232,32 @@ Defaults are sane: UDS at `/tmp/pearlgw.sock`, `noise_rank=256`, `tile_size_m=25
 | `MINER_RPC_HOST` | `localhost` | TCP bind host |
 | `PEARL_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARN`, `ERROR`, `NONE`) |
 
-### GPU miner (Terminal 3)
+### miner_gpu.py
+
+Set these in the terminal where you start the miner.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PEARL_LOG_LEVEL` | `INFO` | Log verbosity |
 | `miner_noise_range` | `128` | Noise range dimension |
 | `miner_noise_rank` | `256` | Noise rank |
 | `miner_tile_size_m` | `256` | GEMM tile M |
 | `miner_tile_size_n` | `1024` | GEMM tile N |
 | `miner_tile_size_k` | `256` | GEMM tile K |
-| `PEARL_LOG_LEVEL` | `INFO` | Log verbosity |
+| `MINER_RPC_SOCKET_PATH` | `/tmp/pearlgw.sock` | Gateway Unix socket |
+| `MINER_RPC_TRANSPORT` | `uds` | Gateway transport (`uds` or `tcp`) |
+| `MINER_RPC_PORT` | `8337` | Gateway TCP port |
+| `MINER_RPC_HOST` | `localhost` | Gateway TCP host |
 
 ## Verifying the Installation
 
 ### 1. Verify pearld RPC responds
 
 ```bash
-curl --user rpcuser:rpcpass --data-binary '{"jsonrpc":"1.0","method":"getblockcount","params":[],"id":"1"}' -H 'content-type:text/plain;' http://localhost:44107/
+curl --user rpcuser:rpcpass \
+  --data-binary '{"jsonrpc":"1.0","method":"getblockcount","params":[],"id":"1"}' \
+  -H 'content-type:text/plain;' \
+  http://localhost:44107/
 ```
 
 Expected: a JSON response with the current block height.
@@ -260,7 +277,9 @@ Common failure: `Port 44107 already in use` or `Connection refused` — check th
 After running `python miner/miner_gpu.py`, look for:
 
 ```
-INFO:     Starting standalone GPU miner (no VLLM)
+INFO: Starting standalone GPU miner (no vLLM)
+INFO: Gateway: uds:///tmp/pearlgw.sock
+INFO: Mining params: noise_range=128, noise_rank=256, tile=(256,1024,256)
 ```
 
 If you see:
@@ -276,11 +295,11 @@ The gateway socket has not appeared yet. Ensure `pearl-gateway start` is running
 Look for recurring log messages from the miner:
 
 ```
-INFO:     Mining round completed
-INFO:     Mining round failed: ...
+INFO: Mining round completed
+INFO: Mining round failed: ...
 ```
 
-Even failed rounds confirm that the miner is receiving jobs, computing hashes, and checking the target. If you see only the startup line and then silence, the gateway may not be delivering block templates — check `pearld` sync status and gateway logs.
+Even failed rounds confirm that the miner is receiving jobs, computing hashes, and checking the target. If you see only the startup line and then silence, check `pearld` sync status and gateway logs.
 
 ## Port Reference
 
@@ -293,17 +312,6 @@ Even failed rounds confirm that the miner is receiving jobs, computing hashes, a
 | `/tmp/pearlgw.sock` | pearl-gateway | Unix Domain Socket (default miner transport) |
 
 ## Troubleshooting
-
-### `uv sync` fails because `vllm-miner` is missing
-
-`vllm-miner` is listed in `pyproject.toml` but the directory is absent from this checkout.  
-Install only the available workspace packages, or restore the missing package before syncing.
-
-```bash
-uv sync --package pearl-gemm
-```
-
-If dependency resolution still fails, install the required runtime packages manually.
 
 ### CUDA kernel build fails
 
@@ -330,7 +338,7 @@ If you prefer TLS on the node, start the gateway with `PEARLD_RPC_URL=https://lo
 # Check gateway process
 ps aux | grep pearl-gateway
 
-# Check for port conflicts
+# Check for socket conflicts
 lsof /tmp/pearlgw.sock   # Linux/macOS
 
 # Restart with debug logs
@@ -344,9 +352,7 @@ PEARL_LOG_LEVEL=DEBUG pearl-gateway start
 ls -la /tmp/pearlgw.sock
 
 # If using TCP (Windows or socket conflicts)
-export MINER_RPC_TRANSPORT=tcp
-export MINER_RPC_PORT=8337
-python miner/miner_gpu.py
+python miner/miner_gpu.py --gateway-tcp --gateway-host localhost --gateway-port 8337
 ```
 
 ### Wallet / `getnewaddress` returns an error
@@ -361,7 +367,7 @@ ps aux | grep oyster
 
 ## Appendix — `run_mining.py`
 
-`miner/run_mining.py` is a production orchestrator that starts `pearld`, `pearl-gateway`, and the direct mining loop in a single process. It is used for automated deployments (e.g., Lightning AI).
+`miner/run_mining.py` is a production orchestrator that starts `pearld`, `pearl-gateway`, and a direct mining loop in a single process. It is used for automated deployments.
 
 ```bash
 python miner/run_mining.py
