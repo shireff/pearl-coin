@@ -231,10 +231,11 @@ class MiningGraphSession:
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
 
         # ── CUDA Graph (captured once) ────────────────────────────────────
-        self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank)
+        shared_mem_bytes = estimate_shared_mem_bytes(tile_h, tile_w, rank)
+        self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank, shared_mem_bytes)
         if self.graph_state is None:
             raise RuntimeError(
-                f"create_mining_graph failed for tile=({tile_h},{tile_w}) — try smaller tile size"
+                f"create_mining_graph failed for tile=({tile_h},{tile_w}) smem={shared_mem_bytes} — try smaller tile size"
             )
 
     def run_round(self, mining_job: MiningJob) -> bool:
