@@ -1,0 +1,16 @@
+for rebuid
+cd ~/pearl-cion
+source pearl-venv/bin/activate
+cd miner/pearl-gemm
+python setup.py build_ext --inplace
+
+for sure 
+find . -name "pearl_gemm_cuda*.so"
+
+
+for run
+python miner/miner_gpu.py \
+  --rpc-url http://127.0.0.1:44107 \
+  --rpc-user rpcuser \
+  --rpc-password rpcpass \
+  --mining-address prl1pmt5e954cpepqmvnpm8sfywmjhvupjpdd5trtkdw8jca86auuvlls45s2x8
