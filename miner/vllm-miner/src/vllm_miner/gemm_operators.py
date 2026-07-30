@@ -239,6 +239,22 @@ def _generate_noise_factors_streamed(
     )
 
 
+_STREAM_A: torch.cuda.Stream | None = None
+_STREAM_B: torch.cuda.Stream | None = None
+_STREAM_NOISE: torch.cuda.Stream | None = None
+
+
+def _get_streams(device: torch.device) -> tuple[torch.cuda.Stream, torch.cuda.Stream, torch.cuda.Stream]:
+    global _STREAM_A, _STREAM_B, _STREAM_NOISE
+    if _STREAM_A is None or _STREAM_A.device != device:
+        _STREAM_A = torch.cuda.Stream(device=device)
+    if _STREAM_B is None or _STREAM_B.device != device:
+        _STREAM_B = torch.cuda.Stream(device=device)
+    if _STREAM_NOISE is None or _STREAM_NOISE.device != device:
+        _STREAM_NOISE = torch.cuda.Stream(device=device)
+    return _STREAM_A, _STREAM_B, _STREAM_NOISE
+
+
 def pearl_gemm_noisy(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -318,8 +334,7 @@ def pearl_gemm_noisy(
 
     key_tensor.copy_(torch.frombuffer(bytearray(hash_key), dtype=torch.uint8))
 
-    stream_a = torch.cuda.Stream(device=device)
-    stream_b = torch.cuda.Stream(device=device)
+    stream_a, stream_b, noise_stream = _get_streams(device)
 
     _run_tensor_hash_on_stream(A.to(torch.uint8), key_tensor, A_tensor_hash, scratchpad, stream_a)
     _run_tensor_hash_on_stream(B.to(torch.uint8), key_tensor, B_tensor_hash, scratchpad, stream_b)
@@ -332,7 +347,6 @@ def pearl_gemm_noisy(
         commitment_hash_A, commitment_hash_B,
     )
 
-    noise_stream = torch.cuda.Stream(device=device)
     noise_factors = _generate_noise_factors_streamed(
         m, n, k, r, commitment_hash_A, commitment_hash_B, device, noise_stream
     )
@@ -372,9 +386,9 @@ def pearl_gemm_noisy(
         tile_size_m=config.settings.tile_size_m,
         tile_size_n=config.settings.tile_size_n,
         tile_size_k=config.settings.tile_size_k,
-        pipeline_stages=4,
-        cluster_size_m=2,
-        cluster_size_n=2,
+        pipeline_stages=2,
+        cluster_size_m=1,
+        cluster_size_n=1,
         run_noising_A=True,
         run_noising_B=True,
         skip_reduction=False,
