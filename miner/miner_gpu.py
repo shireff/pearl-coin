@@ -21,6 +21,7 @@ from miner_base.block_submission import create_proof
 from miner_base.gateway_client import MiningClient
 from miner_base.settings import MinerSettings
 from pearl_gateway.comm.dataclasses import MiningJob, OpenedBlockInfo
+from pearl_gateway.comm.mining_configuration import MMAType, MiningConfiguration, PeriodicPattern
 from pearl_gateway.config import MinerRpcConfig
 from pearl_gemm import gpu_jackpot_hash, gpu_mine_batch, noise_gen
 
@@ -141,11 +142,12 @@ def run_single_mining_round(
     """Fetch one job from the gateway, mine it on GPU, submit proof."""
     mining_job: MiningJob = client.get_mining_info()
 
-    from pearl_gateway.comm.dataclasses import MiningConfiguration
-
     mining_config = MiningConfiguration(
         common_dim=settings.noise_range,
         rank=settings.noise_rank,
+        mma_type=MMAType.Int7xInt7ToInt32,
+        rows_pattern=PeriodicPattern.from_list(settings.rows_pattern),
+        cols_pattern=PeriodicPattern.from_list(settings.cols_pattern),
     )
 
     open_block = OpenedBlockInfo(
