@@ -27,7 +27,17 @@ TORCH_CUDA="$(python3 -c 'import torch; print(getattr(torch.version, "cuda", "")
 REQUIRED_CUDA="${TORCH_CUDA:-13.0}"
 
 if [ -z "${CUDA_HOME:-}" ]; then
-    candidates="/usr/local/cuda-${REQUIRED_CUDA} /usr/local/cuda-${REQUIRED_CUDA%.*} /usr/local/cuda /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda-13 /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-*"
+    if command -v nvcc >/dev/null 2>&1; then
+        nvcc_path="$(command -v nvcc)"
+        nvcc_version="$($nvcc_path -V 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+' || true)"
+        if [ "${nvcc_version}" = "${REQUIRED_CUDA}" ]; then
+            CUDA_HOME="$(dirname "$(dirname "$nvcc_path")")"
+        fi
+    fi
+fi
+
+if [ -z "${CUDA_HOME:-}" ]; then
+    candidates="/usr/local/cuda-${REQUIRED_CUDA} /usr/local/cuda-${REQUIRED_CUDA%.*} /usr/local/cuda /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda-13 /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0"
     for candidate in $candidates; do
         if [ -x "$candidate/bin/nvcc" ]; then
             CUDA_HOME="$candidate"
