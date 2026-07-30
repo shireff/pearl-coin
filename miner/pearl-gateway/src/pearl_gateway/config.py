@@ -20,8 +20,8 @@ class PearlConfig(BaseSettings):
     rpc_url: str = "http://0.0.0.0:44107"
     rpc_user: str = "user"
     rpc_password: str = "pass"
-    refresh_interval_seconds: int = 0.5
-    mining_address: str
+    refresh_interval_seconds: float = 0.5
+    mining_address: str = ""
 
 
 class MinerRpcConfig(BaseSettings):
