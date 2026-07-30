@@ -28,6 +28,7 @@ DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
 DEFAULT_GATEWAY_TCP_PORT = 8337
 SUPPORTED_NOISE_RANKS = (64, 128)
 SUPPORTED_NOISE_GEN_THREAD_COUNTS = (32, 64, 128)
+JOB_STRUCT_BYTES = 128
 
 
 def parse_args():
@@ -199,7 +200,7 @@ def run_single_mining_round(
         b_noised_t=B_noised_t,
         a_rows_data=a_rows,
         b_cols_data=b_cols,
-        jobs=torch.zeros((1,), dtype=torch.int32, device="cuda"),
+        jobs=torch.zeros((1, JOB_STRUCT_BYTES), dtype=torch.uint8, device="cuda"),
         num_jobs=1,
         P=1,
         Q=1,
@@ -213,15 +214,8 @@ def run_single_mining_round(
     gpu_mine_batch_time = time.time() - kernel_start
 
     # ── Hash jackpots ────────────────────────────────────────────────────────
-    keys   = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
-    hashes = torch.empty((1, 1, 8), dtype=torch.uint32, device="cuda")
-    gpu_jackpot_hash(
-        jackpots=jackpots,
-        keys=keys,
-        hashes=hashes,
-        num_candidates=1,
-        num_combos=1,
-    )
+    keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
+    hashes = gpu_jackpot_hash(jackpots=jackpots, keys=keys)
 
     elapsed = time.time() - kernel_start
     tmok    = (tile_h * tile_w) / rank / 1000.0
