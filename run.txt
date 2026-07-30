@@ -83,7 +83,6 @@ python miner/miner_gpu.py \
   --mining-address <YOUR_WALLET_ADDRESS> \
   --noise-range 256 --P 8 --Q 8
 
-
 # ── REBUILD pearl-gemm only ───────────────────────────────────────────
 
 source /workspace/pearl-venv/bin/activate
