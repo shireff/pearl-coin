@@ -278,7 +278,16 @@ def run_single_mining_round(
 
     # ── Hash jackpots ────────────────────────────────────────────────────────
     keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
-    hashes = gpu_jackpot_hash(jackpots=jackpots, keys=keys)
+    num_candidates = jackpots.size(0)
+    num_combos = jackpots.size(1)
+    hashes = torch.empty((num_candidates, num_combos, 8), dtype=torch.uint32, device="cuda")
+    gpu_jackpot_hash(
+        jackpots=jackpots,
+        keys=keys,
+        hashes=hashes,
+        num_candidates=int(num_candidates),
+        num_combos=int(num_combos),
+    )
 
     elapsed = time.time() - kernel_start
     tmok    = (tile_h * tile_w) / rank / 1000.0
