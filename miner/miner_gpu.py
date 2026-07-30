@@ -53,24 +53,60 @@ def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = 
 
 
 def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
-    aligned_rank = ((rank + 1 + 3) // 4) * 4
-    return (
-        tile_h * tile_w
-        + tile_h * aligned_rank
-        + aligned_rank * tile_w
-        + 16
-    ) * 4
+    """Estimate shared memory bytes matching gpu_mining_launch.cu formula exactly.
+
+    shared_mem = (tile_h*tile_w + tile_h*(rank+1) + (rank+1)*tile_w + JACKPOT_SIZE) * 4
+    """
+    JACKPOT_SIZE = 16
+    smem_a_pitch = tile_h * (rank + 1)
+    smem_b_pitch = (rank + 1) * tile_w
+    return (tile_h * tile_w + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * 4
 
 
 def get_cuda_shared_memory_limit() -> int:
+    """Return max dynamic shared memory per block (opt-in) for device 0."""
     try:
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            props = torch.cuda.get_device_properties(torch.cuda.current_device())
-            return int(
-                getattr(props, "max_shared_memory_per_block", None)
-                or getattr(props, "shared_memory_per_block", None)
-                or DEFAULT_MAX_SHARED_MEMORY_BYTES
+        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+            return DEFAULT_MAX_SHARED_MEMORY_BYTES
+        device_idx = torch.cuda.current_device()
+        # Try ctypes path: cudaDevAttrMaxSharedMemoryPerBlockOptin = 78
+        import ctypes
+        try:
+            _libcuda = ctypes.CDLL("libcuda.so.1")
+            _val = ctypes.c_int(0)
+            # cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev)
+            # CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97
+            ret = _libcuda.cuDeviceGetAttribute(
+                ctypes.byref(_val), ctypes.c_int(97), ctypes.c_int(device_idx)
             )
+            if ret == 0 and _val.value > 0:
+                return _val.value
+        except Exception:
+            pass
+        # Fallback: use cudart path
+        try:
+            import ctypes.util
+            _libcudart = ctypes.CDLL("libcudart.so")
+            _val = ctypes.c_int(0)
+            # cudaDevAttrMaxSharedMemoryPerBlockOptin = 78
+            ret = _libcudart.cudaDeviceGetAttribute(
+                ctypes.byref(_val), ctypes.c_int(78), ctypes.c_int(device_idx)
+            )
+            if ret == 0 and _val.value > 0:
+                return _val.value
+        except Exception:
+            pass
+        # Final fallback: use sm version heuristic
+        props = torch.cuda.get_device_properties(device_idx)
+        sm = props.major * 10 + props.minor
+        if sm >= 90:    # Hopper/Blackwell: 232 KB
+            return 232 * 1024
+        elif sm >= 80:  # Ampere: 163 KB
+            return 163 * 1024
+        elif sm >= 70:  # Volta/Turing: 96 KB
+            return 96 * 1024
+        else:           # older: 64 KB
+            return 64 * 1024
     except Exception:
         pass
     return DEFAULT_MAX_SHARED_MEMORY_BYTES
@@ -87,14 +123,25 @@ def get_gpu_name() -> str | None:
 
 
 def choose_safe_tile_size(tile_h: int, tile_w: int, rank: int, shared_mem_limit: int) -> tuple[int, int]:
+    """Return the largest tile size that fits in shared memory.
+
+    Ordered largest→smallest. tile (16,16) triggers the fast WMMA fused path
+    in launch_gpu_mining (requires exactly tile_h==16, tile_w==16).
+    """
     if estimate_shared_mem_bytes(tile_h, tile_w, rank) <= shared_mem_limit:
         return tile_h, tile_w
 
-    for candidate in ((128, 128), (64, 64), (32, 32), (16, 16)):
+    # Ordered largest to smallest — pick first that fits
+    for candidate in (
+        (128, 128),
+        (64, 64),
+        (32, 32),
+        (16, 16),  # triggers WMMA fused path in launch_gpu_mining
+    ):
         if estimate_shared_mem_bytes(candidate[0], candidate[1], rank) <= shared_mem_limit:
             return candidate
 
-    return DEFAULT_TILE_SIZE_M, DEFAULT_TILE_SIZE_N
+    return 16, 16
 
 
 def parse_args():
@@ -298,22 +345,23 @@ def run_single_mining_round(
     except Exception:
         pass
 
-    msg = f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok / elapsed if elapsed > 0 else 0.0:.2f}"
+    tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
     if logger is not None:
-        logger.info("GPU round time: {}s, tmok/s={:.2f}", elapsed, tmok / elapsed if elapsed > 0 else 0.0)
+        logger.info(f"GPU round time: {elapsed:.3f}s, tmok/s={tmok_per_s:.2f}")
     else:
-        print(msg)
+        print(f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok_per_s:.2f}")
 
     # ── Check for winner ─────────────────────────────────────────────────────
     # mining_job.target is a uint256 integer — unpack into 8 × uint32 (little-endian words)
     _target_int = int(mining_job.target)
     _target_words = [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
+    # Cast to int64 — PyTorch does not support <= for uint32
     target_tensor = torch.tensor(_target_words, dtype=torch.int64, device="cuda")  # (8,)
-    hashes_int64 = hashes.to(torch.int64)
-    # hashes shape: (num_jobs, num_combos, 8) — compare each hash against the target word-by-word
-    # A hash wins if every word is <= the corresponding target word
+    # hashes shape: (num_jobs, num_combos, 8) uint32 → cast to int64 for comparison
+    hashes_i64 = hashes.squeeze(0).to(torch.int64)  # (num_combos, 8)
+    # A hash wins if every word is <= the corresponding target word (big-endian comparison)
     winners = torch.nonzero(
-        (hashes_int64.squeeze(0) <= target_tensor.unsqueeze(0)).all(dim=-1),
+        (hashes_i64 <= target_tensor.unsqueeze(0)).all(dim=-1),
         as_tuple=False,
     )
 
