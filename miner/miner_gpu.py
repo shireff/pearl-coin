@@ -329,8 +329,17 @@ def main():
                 run_single_mining_round(client, settings)
             except KeyboardInterrupt:
                 raise
-            except Exception:
-                logger.exception("Mining round failed")
+            except Exception as exc:
+                import traceback as _tb
+                tb = _tb.extract_tb(exc.__traceback__)
+                last = tb[-1] if tb else None
+                location = f"{last.filename}:{last.lineno} in {last.name}" if last else "unknown"
+                logger.error(
+                    "Mining round failed — %s: %s  [at %s]",
+                    type(exc).__name__,
+                    exc,
+                    location,
+                )
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
@@ -347,4 +356,22 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    import traceback as _tb
+
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as _exc:
+        frames = _tb.extract_tb(_exc.__traceback__)
+        print("\n=== FATAL ERROR ===", file=_sys.stderr)
+        print(f"Type   : {type(_exc).__name__}", file=_sys.stderr)
+        print(f"Message: {_exc}", file=_sys.stderr)
+        if frames:
+            last = frames[-1]
+            print(f"File   : {last.filename}", file=_sys.stderr)
+            print(f"Line   : {last.lineno}  in  {last.name}", file=_sys.stderr)
+            print(f"Code   : {last.line}", file=_sys.stderr)
+        print("===================\n", file=_sys.stderr)
+        _sys.exit(1)
