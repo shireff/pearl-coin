@@ -364,28 +364,6 @@ def gpu_mine_batch(
 
 
 # Fake Tensor function for torch.compile support
-@torch.library.register_fake("pearl_gemm::gpu_mine_batch")
-def _abstract_gpu_mine_batch(
-    a_noised,
-    b_noised_t,
-    a_rows_data,
-    b_cols_data,
-    jobs,
-    num_jobs,
-    P,
-    Q,
-    tile_h,
-    tile_w,
-    m,
-    n,
-    k,
-    rank,
-):
-    num_combos = P * Q
-    return torch.empty({num_jobs, num_combos, 16}, dtype=torch.uint32)
-
-
-# Fake Tensor function for torch.compile support
 @torch.library.register_fake("pearl_gemm::launch_persistent_mining")
 def _abstract_launch_persistent_mining(
     a_noised,
