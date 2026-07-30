@@ -1280,7 +1280,7 @@ at::Tensor gpu_mine_batch(
   auto options = a_noised.options().dtype(torch::kUInt32);
   auto jackpots = torch::empty({num_jobs, num_combos, JACKPOT_SIZE}, options);
   auto hashes = torch::empty({num_jobs, num_combos, 8}, options);
-  auto winner_flags = torch::empty({static_cast<int64_t>(num_jobs * num_combos + 7) / 8}, options);
+  auto winner_flags = torch::empty({static_cast<int64_t>(num_jobs * num_combos + 7) / 8}, a_noised.options().dtype(torch::kUInt8));
 
   pearl::mining::launch_gpu_mining(
       a_noised.data_ptr<int32_t>(),
