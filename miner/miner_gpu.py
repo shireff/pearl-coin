@@ -143,12 +143,12 @@ def run_single_mining_round(
     """Fetch one job from the gateway, mine it on GPU, submit proof."""
     mining_job: MiningJob = client.get_mining_info()
 
-    rank = settings.noise_rank
-    # m/n/k are common dimensions for the noised matrix and should match
-    # the GEMM common dimension rather than the noise range.
-    m = settings.tile_size_m
-    n = settings.tile_size_n
-    k = settings.tile_size_k
+    rank  = settings.noise_rank
+    # m/n/k are the matrix inner dimensions — must equal noise_range.
+    # tile_h/tile_w are the output tile dimensions used by gpu_mine_batch.
+    m     = settings.noise_range
+    n     = settings.noise_range
+    k     = settings.noise_range
     tile_h = settings.tile_size_m
     tile_w = settings.tile_size_n
 
