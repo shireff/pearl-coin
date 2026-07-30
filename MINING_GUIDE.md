@@ -181,7 +181,8 @@ python miner/miner_gpu.py \
   --rpc-url http://127.0.0.1:44107 \
   --rpc-user rpcuser \
   --rpc-password rpcpass \
-  --mining-address <YOUR_WALLET_ADDRESS>
+  --mining-address <YOUR_WALLET_ADDRESS> \
+  --noise-range 256 --P 8 --Q 8
 ```
 
 This starts `pearl-gateway` as a background process, waits for the gateway socket to appear, then begins mining.
