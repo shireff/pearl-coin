@@ -83,7 +83,7 @@ def _load_cuda_extension():
 # Fail fast and clearly if the .so is missing — before any sub-module import
 # attempts the same and produces a cryptic traceback.
 _cuda_ext = _load_cuda_extension()
-_sys.modules.setdefault("pearl_gemm_cuda", _cuda_ext)
+_sys.modules.setdefault("pearl_gemm.pearl_gemm_cuda", _cuda_ext)
 
 # ---------------------------------------------------------------------------
 # Re-export pearl_gemm_cuda symbols for the public API
