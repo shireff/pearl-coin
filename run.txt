@@ -14,7 +14,7 @@ python miner/miner_gpu.py \
   --rpc-user rpcuser \
   --rpc-password rpcpass \
   --mining-address prl1pmt5e954cpepqmvnpm8sfywmjhvupjpdd5trtkdw8jca86auuvlls45s2x8 \
-  --P 4 --Q 4
+  --noise-range 256 --P 8 --Q 8
 
 
 for venv
@@ -31,8 +31,10 @@ cd ~/pearl-cion/miner/pearl-gemm-build-utils
 pip install -e .
 cd ~/pearl-cion/miner/pearl-gemm
 python setup.py build_ext --inplace
-
+cd ~/pearl-cion/miner/pearl-gemm
+export PYTHONPATH=$PWD/src:$PYTHONPATH
 python -c "import pearl_gemm_cuda; print('BUILD OK')"
+
 
 # ── Fix: Session closes and reopens — wrong venv activated ──────────────────
 # Problem: After SSH/tmux session restart, ~/pearl-cion/pearl-venv activates

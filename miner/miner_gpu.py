@@ -156,13 +156,13 @@ def parse_args():
     g.add_argument("--gateway-port", type=int, default=int(os.environ.get("MINER_RPC_PORT", str(DEFAULT_GATEWAY_TCP_PORT))))
     g = parser.add_argument_group("Mining parameters")
     g.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "128")))
-    g.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "128")))
+    g.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "256")))
     g.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "64")))
     g.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "64")))
     g.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "128")))
-    g.add_argument("--P", type=int, default=int(os.environ.get("miner_P", "4")),
+    g.add_argument("--P", type=int, default=int(os.environ.get("miner_P", "8")),
                    help="Number of A-row partitions (more = more nonces per round)")
-    g.add_argument("--Q", type=int, default=int(os.environ.get("miner_Q", "4")),
+    g.add_argument("--Q", type=int, default=int(os.environ.get("miner_Q", "8")),
                    help="Number of B-col partitions (more = more nonces per round)")
     g.add_argument("--num-jobs", type=int, default=int(os.environ.get("miner_num_jobs", "1")),
                    help="Number of parallel mining jobs per round")
@@ -236,14 +236,10 @@ class MiningGraphSession:
         self.tile_h = tile_h
         self.tile_w = tile_w
 
-        # Clamp P and Q to avoid repeating the same tile rows/cols
-        # P*tile_h should not exceed m to ensure diverse partitions
-        max_P = max(1, m // tile_h)
-        max_Q = max(1, n // tile_w)
-        if P > max_P:
-            P = max_P
-        if Q > max_Q:
-            Q = max_Q
+        # Allow P and Q larger than m//tile_h by using strided offsets.
+        # Each partition samples tile_h rows starting at a different stride,
+        # so even overlapping partitions cover different combinations.
+        # No hard clamping — just ensure offsets wrap modulo m.
         self.clamped_P = P
         self.clamped_Q = Q
 
