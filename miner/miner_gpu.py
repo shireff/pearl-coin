@@ -479,27 +479,43 @@ def main():
         _job_queue: _queue.Queue = _queue.Queue(maxsize=2)
         _stop_prefetch = threading.Event()
 
+        # Thread-safe client wrapper — use a list so inner function can rebind it
+        _client_ref = [client]
+
         def _prefetch_worker():
+            import queue as _q
             while not _stop_prefetch.is_set():
                 try:
-                    job = client.get_mining_info()
-                    _job_queue.put(job, timeout=1.0)
+                    job = _client_ref[0].get_mining_info()
+                    # Use put_nowait + discard oldest if full to avoid blocking
+                    try:
+                        _job_queue.put_nowait(job)
+                    except _q.Full:
+                        # Queue is full — discard oldest, add newest (latest job preferred)
+                        try:
+                            _job_queue.get_nowait()
+                        except _q.Empty:
+                            pass
+                        try:
+                            _job_queue.put_nowait(job)
+                        except _q.Full:
+                            pass
                 except BrokenPipeError:
                     logger.warning("Prefetch: gateway connection lost — reconnecting in 3s...")
                     time.sleep(3)
                     try:
-                        client.close()
+                        _client_ref[0].close()
                     except Exception:
                         pass
                     try:
-                        client = MiningClient(rpc_config)
+                        _client_ref[0] = MiningClient(rpc_config)
                         logger.info("Prefetch: reconnected to gateway")
                     except Exception as e:
                         logger.error(f"Prefetch: reconnect failed: {e}")
                         time.sleep(5)
                 except Exception as e:
-                    logger.debug(f"Prefetch error: {e}")
-                    time.sleep(0.01)
+                    logger.debug(f"Prefetch error: {type(e).__name__}: {e}")
+                    time.sleep(0.05)
 
         prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
         prefetch_thread.start()
@@ -533,7 +549,7 @@ def main():
 
                 if won:
                     plain_proof = session.build_proof(mining_job)
-                    client.submit_plain_proof(plain_proof, mining_job)
+                    _client_ref[0].submit_plain_proof(plain_proof, mining_job)
                     logger.info("Block found and submitted!")
 
             except _queue.Empty:
