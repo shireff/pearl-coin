@@ -10,11 +10,19 @@ No custom gateways, no invented REST endpoints.
 """
 
 import argparse
+import inspect
 import os
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
+
+# Prefer local pearl_gemm source over any globally installed package.
+_local_root = Path(__file__).resolve().parent
+_local_pearl_gemm_src = str(_local_root.parent / "pearl-gemm" / "src")
+if _local_pearl_gemm_src not in sys.path:
+    sys.path.insert(0, _local_pearl_gemm_src)
 
 import torch
 from miner_base.gateway_client import MiningClient
@@ -278,7 +286,25 @@ def run_single_mining_round(
 
     # ── Hash jackpots ────────────────────────────────────────────────────────
     keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
-    hashes = gpu_jackpot_hash(jackpots, keys)
+    num_candidates = jackpots.size(0)
+    num_combos = jackpots.size(1)
+    hashes = torch.empty((num_candidates, num_combos, 8), dtype=torch.uint32, device="cuda")
+
+    try:
+        params = inspect.signature(gpu_jackpot_hash).parameters
+    except (ValueError, TypeError):
+        hashes = gpu_jackpot_hash(jackpots, keys)
+    else:
+        if len(params) == 2:
+            hashes = gpu_jackpot_hash(jackpots, keys)
+        else:
+            gpu_jackpot_hash(
+                jackpots,
+                keys,
+                hashes,
+                int(num_candidates),
+                int(num_combos),
+            )
 
     elapsed = time.time() - kernel_start
     tmok    = (tile_h * tile_w) / rank / 1000.0
