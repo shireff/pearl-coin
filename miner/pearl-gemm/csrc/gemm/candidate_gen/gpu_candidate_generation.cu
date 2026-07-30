@@ -21,7 +21,7 @@ __global__ void gpu_generate_raw_matrices_kernel(
     uint32_t tid = threadIdx.x;
     uint32_t block_size = blockDim.x;
 
-    curandStatePhilox4x32_10_t rng_state;
+    curandStatePhilox4_32_10_t rng_state;
     uint64_t candidate_seed = base_seed + static_cast<uint64_t>(cid);
     curand_init(candidate_seed, 0, 0, &rng_state);
 
