@@ -226,8 +226,10 @@ def run_single_mining_round(
     EAR_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
     EBL_R_major  = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
     EBL_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
-    key_A        = torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda")
-    key_B        = torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda")
+    key_A        = allocate_aligned_byte_tensor(32, align=16, device="cuda")
+    key_B        = allocate_aligned_byte_tensor(32, align=16, device="cuda")
+    key_A.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
+    key_B.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
 
     # ── Generate noise on GPU ────────────────────────────────────────────────
     kernel_start = time.time()
