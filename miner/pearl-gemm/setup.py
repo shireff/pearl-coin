@@ -474,7 +474,6 @@ def _build_ext_modules():
         "csrc/gemm/persistent_pipeline.cu",
         "csrc/gemm/gpu_mining_kernel.cu",
         "csrc/gemm/gpu_mining_launch.cu",
-        "csrc/gemm/gpu_mining_wmma.cu",
         "csrc/gemm/gpu_mining_graph.cu",
         "csrc/gemm/pearl_gemm_api_kernels.cu",
         "csrc/gemm/candidate_gen/gpu_candidate_generation.cu",
