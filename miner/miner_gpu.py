@@ -538,14 +538,7 @@ def main():
                 tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                 tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
 
-                round_count += 1
-                total_elapsed += elapsed
-                # Log every 100 rounds to reduce I/O overhead
-                if round_count % 100 == 0:
-                    avg_tmok = tmok / (total_elapsed / round_count) if total_elapsed > 0 else 0
-                    logger.info(f"[round {round_count}] avg GPU time: {total_elapsed/round_count*1000:.1f}ms, avg tmok/s={avg_tmok:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
-                    total_elapsed = 0.0
-                    round_count = 0
+                logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
 
                 if won:
                     plain_proof = session.build_proof(mining_job)
