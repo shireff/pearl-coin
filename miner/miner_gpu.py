@@ -144,9 +144,11 @@ def run_single_mining_round(
     mining_job: MiningJob = client.get_mining_info()
 
     rank = settings.noise_rank
-    m = settings.noise_range
-    n = settings.noise_range
-    k = settings.noise_range
+    # m/n/k are common dimensions for the noised matrix and should match
+    # the GEMM common dimension rather than the noise range.
+    m = settings.tile_size_m
+    n = settings.tile_size_n
+    k = settings.tile_size_k
     tile_h = settings.tile_size_m
     tile_w = settings.tile_size_n
 
