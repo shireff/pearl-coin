@@ -154,24 +154,13 @@ class PearlGpuMiner(AsyncLoopManager):
 
 
 def main():
-    import json
-    import sys
-
     from miner_utils import get_logger
+    from pearl_gateway.config import MinerRpcConfig
 
     _LOGGER = get_logger("miner_gpu")
 
-    with open("/etc/pearl_miner/config.json") as f:
-        config = json.load(f)
-
-    miner_rpc_config = {
-        "host": config.get("gateway_host", "localhost"),
-        "port": config.get("gateway_port", 8545),
-    }
-
-    miner_settings = MinerSettings(
-        noise_rank=config.get("noise_rank", 256),
-    )
+    miner_rpc_config = MinerRpcConfig()
+    miner_settings = MinerSettings()
 
     miner = PearlGpuMiner(miner_rpc_config, miner_settings)
     _LOGGER.info("Starting GPU miner (no vLLM)")
