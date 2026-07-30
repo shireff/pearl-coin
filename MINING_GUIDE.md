@@ -92,6 +92,17 @@ cd miner/pearl-gemm
 bash build.sh --no-pull
 ```
 
+### Rebuild CUDA kernels (after code changes)
+
+If you modify any `.cu` or `.cpp` source file and need to rebuild:
+
+```bash
+cd miner/pearl-gemm
+pip install -e .
+```
+
+This reinstalls the extension in editable mode and recompiles only the changed files.
+
 ## Wallet Setup
 
 Mining requires a **Taproot mining address** that receives block rewards.  
