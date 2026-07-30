@@ -308,11 +308,12 @@ def run_single_mining_round(
     # mining_job.target is a uint256 integer — unpack into 8 × uint32 (little-endian words)
     _target_int = int(mining_job.target)
     _target_words = [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
-    target_tensor = torch.tensor(_target_words, dtype=torch.uint32, device="cuda")  # (8,)
+    target_tensor = torch.tensor(_target_words, dtype=torch.int64, device="cuda")  # (8,)
+    hashes_int64 = hashes.to(torch.int64)
     # hashes shape: (num_jobs, num_combos, 8) — compare each hash against the target word-by-word
     # A hash wins if every word is <= the corresponding target word
     winners = torch.nonzero(
-        (hashes.squeeze(0) <= target_tensor.unsqueeze(0)).all(dim=-1),
+        (hashes_int64.squeeze(0) <= target_tensor.unsqueeze(0)).all(dim=-1),
         as_tuple=False,
     )
 
