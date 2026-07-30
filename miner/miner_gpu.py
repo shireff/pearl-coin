@@ -300,7 +300,7 @@ def run_single_mining_round(
 
     msg = f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok / elapsed if elapsed > 0 else 0.0:.2f}"
     if logger is not None:
-        logger.info("GPU round time: %.3fs, tmok/s=%.2f", elapsed, tmok / elapsed if elapsed > 0 else 0.0)
+        logger.info("GPU round time: {}s, tmok/s={:.2f}", elapsed, tmok / elapsed if elapsed > 0 else 0.0)
     else:
         print(msg)
 
