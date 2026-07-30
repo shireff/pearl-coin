@@ -209,13 +209,20 @@ Expected: a JSON response with the current block height.
 
 ### 2. Verify pearl-gateway starts successfully
 
-After running `pearl-gateway start`, look for:
+If you started `pearl-gateway` manually, look for:
 
 ```
 PearlGateway started successfully
 ```
 
-Common failure: `Port 44107 already in use` or `Connection refused` — check that `pearld` is running and `--rpcuser` / `--rpcpass` match the gateway env vars.
+If `miner_gpu.py` started it for you, look for:
+
+```
+INFO: Starting managed pearl-gateway process...
+INFO: Gateway socket ready: /tmp/pearlgw.sock
+```
+
+Common failure: `Port 44107 already in use` or `Connection refused` — check that `pearld` is running and `--rpcuser` / `--rpcpass` match.
 
 ### 3. Verify the miner connects successfully
 
@@ -233,7 +240,7 @@ If you see:
 ConnectionRefusedError: [Errno 111] Connection refused
 ```
 
-The gateway socket has not appeared yet. Ensure `pearl-gateway start` is running and `/tmp/pearlgw.sock` exists.
+The gateway socket has not appeared yet. Ensure `pearl-gateway` is running and `/tmp/pearlgw.sock` exists.
 
 ### 4. Verify mining jobs are being received
 
@@ -293,12 +300,14 @@ PEARL_LOG_LEVEL=DEBUG pearl-gateway start
 ### Miner reports `ConnectionRefusedError`
 
 ```bash
-# Ensure gateway is running and socket exists
-ls -la /tmp/pearlgw.sock
+# Ensure pearld is running and the miner can reach it
+curl --user rpcuser:rpcpass http://127.0.0.1:44107
 
-# If using TCP (Windows or socket conflicts)
-python miner/miner_gpu.py --gateway-tcp --gateway-host localhost --gateway-port 8337
+# Ensure gateway socket exists
+ls -la /tmp/pearlgw.sock
 ```
+
+If the socket is missing, either start `pearl-gateway` manually or pass `--rpc-url` to `miner_gpu.py` so it starts the gateway for you.
 
 ### Wallet / `getnewaddress` returns an error
 
