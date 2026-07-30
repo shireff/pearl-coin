@@ -13,6 +13,7 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import torch
@@ -113,6 +114,23 @@ def stream_logs(name, proc):
         print(f"[{name}] {line}", end="", flush=True)
 
 
+def wait_for_gateway_socket(proc, socket_path, timeout=30):
+    """Wait for gateway socket while streaming logs and checking process health."""
+    start = time.time()
+    while time.time() - start < timeout:
+        if os.path.exists(socket_path):
+            return True
+        if proc.poll() is not None:
+            logger.error("Managed pearl-gateway exited early with code %s", proc.returncode)
+            if proc.stdout:
+                remaining = proc.stdout.read()
+                if remaining:
+                    print(remaining, end="", flush=True)
+            return False
+        time.sleep(0.5)
+    return False
+
+
 def run_single_mining_round(
     client: MiningClient,
     settings: MinerSettings,
@@ -204,10 +222,16 @@ def main():
     client = None
     gateway_proc = None
     managed_gateway = False
+    log_thread = None
 
     try:
         if args.rpc_url is not None:
             managed_gateway = True
+            socket_path = args.gateway_socket if not args.gateway_tcp else None
+
+            if not args.gateway_tcp and os.path.exists(socket_path):
+                os.remove(socket_path)
+
             logger.info("Starting managed pearl-gateway process...")
             gateway_proc = start_gateway_process(
                 args.rpc_url,
@@ -216,13 +240,17 @@ def main():
                 args.mining_address,
             )
 
-            socket_path = args.gateway_socket if not args.gateway_tcp else None
             if not args.gateway_tcp:
-                if not wait_for_socket(socket_path, timeout=30):
+                log_thread = threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True)
+                log_thread.start()
+
+                if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30):
                     logger.error("Gateway socket %s never appeared", socket_path)
                     return 1
                 logger.info("Gateway socket ready: %s", socket_path)
             else:
+                log_thread = threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True)
+                log_thread.start()
                 time.sleep(2)
                 logger.info("Waiting for gateway TCP on %s:%s", args.gateway_host, args.gateway_port)
 

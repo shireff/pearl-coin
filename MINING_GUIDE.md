@@ -153,9 +153,9 @@ Verify it is running:
 
 > **Common failure:** If `pearl-gateway` logs `Failed to connect to Pearl node` or returns HTTP 401 / TLS errors, confirm that `pearld` was started with `--notls` and that the `rpcuser` / `rpcpass` match on both sides.
 
-### 2. Start the miner — this automatically starts pearl-gateway
+### 2. Start the miner
 
-If `pearld` is already running, `miner_gpu.py` can manage `pearl-gateway` for you. Just pass the pearl node connection details:
+`miner_gpu.py` manages `pearl-gateway` for you. One command, one terminal:
 
 ```bash
 python miner/miner_gpu.py \
@@ -165,15 +165,20 @@ python miner/miner_gpu.py \
   --mining-address <YOUR_WALLET_ADDRESS>
 ```
 
-`miner_gpu.py` starts `pearl-gateway` as a background process, waits for the gateway socket to appear, then begins mining.
+This starts `pearl-gateway` as a background process, waits for the gateway socket to appear, then begins mining.
 
-> **Note:** When `miner_gpu.py` manages the gateway, it sets `PEARLD_RPC_URL`, `PEARLD_RPC_USER`, `PEARLD_RPC_PASSWORD`, and `PEARLD_MINING_ADDRESS` in the gateway's environment. You do not need to set them separately.
+**What you should see:**
 
-If you prefer to run `pearl-gateway` manually in a separate terminal, use its documented command instead:
-
-```bash
-pearl-gateway start
 ```
+INFO: Starting managed pearl-gateway process...
+[gateway] INFO - PearlGateway started successfully
+INFO: Gateway socket ready: /tmp/pearlgw.sock
+INFO: Starting standalone GPU miner (no vLLM)
+INFO: Gateway: uds:///tmp/pearlgw.sock
+INFO: Mining params: noise_range=128, noise_rank=256, tile=(256,1024,256)
+```
+
+If you prefer manual control, run `pearl-gateway start` in a separate terminal instead, then run `python miner/miner_gpu.py` without `--rpc-url`.
 
 ### Environment Variables
 
@@ -289,15 +294,17 @@ If you prefer TLS on the node, start the gateway with `PEARLD_RPC_URL=https://lo
 ### `pearl-gateway` socket never appears
 
 ```bash
+# Remove any stale socket
+rm -f /tmp/pearlgw.sock
+
 # Check gateway process
 ps aux | grep pearl-gateway
-
-# Check for socket conflicts
-lsof /tmp/pearlgw.sock   # Linux/macOS
 
 # Restart with debug logs
 PEARL_LOG_LEVEL=DEBUG pearl-gateway start
 ```
+
+If you are running `miner_gpu.py` with `--rpc-url` and the socket never appears, the managed gateway may have crashed. Check the prefixed `[gateway]` logs printed by the miner for the actual error.
 
 ### Miner reports `ConnectionRefusedError`
 
