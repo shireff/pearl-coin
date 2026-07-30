@@ -55,7 +55,7 @@ self.noise_graph.replay()
 
 ## 2. تحسينات الوصول للذاكرة (Memory Access Optimizations)
 
-### 2.1 استخدام نسخ الذاكرة غير المتزامنة (Async Memory Copies)
+### ✅ 2.1 استخدام نسخ الذاكرة غير المتزامنة — DONE غير المتزامنة (Async Memory Copies)
 
 | العنصر | التفاصيل |
 |--------|----------|
@@ -72,7 +72,7 @@ with torch.cuda.stream(self.copy_stream):
 
 ---
 
-### 2.2 تقليل الحمل من slice عمليات Python
+### ✅ 2.2 تقليل الحمل من slice عمليات Python — DONE
 
 | العنصر | التفاصيل |
 |--------|----------|
@@ -82,7 +82,7 @@ with torch.cuda.stream(self.copy_stream):
 
 ---
 
-### 2.3 توحيد الصفائف في CUDA memory
+### ✅ 2.3 توحيد الصفائف في CUDA memory — DONE
 
 | العنصر | التفاصيل |
 |--------|----------|
@@ -94,7 +94,7 @@ with torch.cuda.stream(self.copy_stream):
 
 ## 3. تحسينات استخدام GPU (GPU Utilization Optimizations)
 
-### 3.1 زيادة حجم الشبكة (Grid Size) للتوازي
+### ✅ 3.1 زيادة حجم الشبكة (Grid Size) للتوازي — DONE
 
 | العنصر | التفاصيل |
 |--------|----------|
@@ -125,7 +125,7 @@ elapsed = start_event.elapsed_time(end_event) / 1000
 
 ---
 
-### 3.3 تحسين تداخل الحسابات مع الذاكرة
+### ✅ 3.3 تحسين تداخل الحسابات مع الذاكرة — DONE
 
 | العنصر | التفاصيل |
 |--------|----------|
@@ -147,7 +147,7 @@ elapsed = start_event.elapsed_time(end_event) / 1000
 
 ---
 
-### 4.2 تجميع عدة jobs معاً
+### ✅ 4.2 تجميع عدة jobs معاً — DONE
 
 | العنصر | التفاصيل |
 |--------|----------|
@@ -195,7 +195,7 @@ elapsed = start_event.elapsed_time(end_event) / 1000
 
 ---
 
-### 5.3 تحسين shared memory usage
+### ✅ 5.3 تحسين shared memory usage — DONE
 
 | العنصر | التفاصيل |
 |--------|----------|

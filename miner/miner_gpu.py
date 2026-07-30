@@ -103,13 +103,42 @@ def get_gpu_name() -> str | None:
     return None
 
 
-def choose_safe_tile_size(tile_h: int, tile_w: int, rank: int, shared_mem_limit: int) -> tuple[int, int]:
-    """Return the largest tile that fits in shared memory. (16,16) triggers WMMA fused path."""
-    if estimate_shared_mem_bytes(tile_h, tile_w, rank) <= shared_mem_limit:
-        return tile_h, tile_w
-    for candidate in ((128, 128), (64, 64), (32, 32), (16, 16)):
-        if estimate_shared_mem_bytes(candidate[0], candidate[1], rank) <= shared_mem_limit:
-            return candidate
+def get_gpu_sm_version() -> tuple[int, int]:
+    """Return (major, minor) CUDA compute capability for device 0."""
+    try:
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return torch.cuda.get_device_capability(0)
+    except Exception:
+        pass
+    return (0, 0)
+
+
+def get_optimal_tile_size(rank: int, shared_mem_limit: int) -> tuple[int, int]:
+    """Auto-select the best tile size for the current GPU.
+
+    All returned tile sizes are multiples of 16, enabling the fused WMMA
+    (Tensor Core) kernel path for maximum throughput.
+
+    Selection logic:
+      - Blackwell  (SM >= 120, e.g. RTX 5090):  128x128 if SMEM allows, else 64x64
+      - Ada        (SM 8.x, e.g. RTX 4060/4090): 64x64 if SMEM allows, else 32x32
+      - Older GPUs: 32x32 or 16x16
+
+    The tile is always clamped to fit within the GPU's shared memory budget.
+    """
+    major, minor = get_gpu_sm_version()
+    sm = major * 10 + minor
+
+    if sm >= 120:
+        candidates = ((128, 128), (64, 64), (32, 32), (16, 16))
+    elif sm >= 80:
+        candidates = ((64, 64), (32, 32), (16, 16))
+    else:
+        candidates = ((32, 32), (16, 16))
+
+    for tile in candidates:
+        if estimate_shared_mem_bytes(tile[0], tile[1], rank) <= shared_mem_limit:
+            return tile
     return 16, 16
 
 
@@ -415,11 +444,18 @@ def main():
 
         shared_mem_limit = get_cuda_shared_memory_limit()
         gpu_name = get_gpu_name()
-        tile_m, tile_n = choose_safe_tile_size(args.tile_m, args.tile_n, args.noise_rank, shared_mem_limit)
+        tile_m, tile_n = get_optimal_tile_size(args.noise_rank, shared_mem_limit)
         if (tile_m, tile_n) != (args.tile_m, args.tile_n):
             logger.warning(
-                f"Tile ({args.tile_m},{args.tile_n}) exceeds GPU shared memory "
-                f"({shared_mem_limit // 1024} KB) — using ({tile_m},{tile_n})"
+                f"Auto-selected tile ({tile_m},{tile_n}) differs from "
+                f"user setting ({args.tile_m},{args.tile_n}) — "
+                f"shared_mem_limit={shared_mem_limit // 1024} KB"
+            )
+        else:
+            major, minor = get_gpu_sm_version()
+            logger.info(
+                f"GPU SM {major}.{minor}: selected tile ({tile_m},{tile_n}) "
+                f"for WMMA path (shared_mem_limit={shared_mem_limit // 1024} KB)"
             )
 
         logger.info(f"GPU: {gpu_name or 'unknown'}  shared_mem_limit={shared_mem_limit // 1024} KB")
