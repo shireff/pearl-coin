@@ -120,8 +120,9 @@ wallet and generate a Taproot mining address:
   --rpcuser=rpcuser \
   --rpcpass=rpcpass \
   --rpclisten=0.0.0.0:44107 \
-  --miningaddr=<your-taproot-address> \
-  --txindex
+  --txindex \
+  --notls \
+  --miningaddr=<your-taproot-address>
 ```
 
 Key flags: `--testnet` / `--simnet` for non-mainnet, `--notls` to disable TLS,

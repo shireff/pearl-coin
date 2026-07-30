@@ -243,6 +243,7 @@ def run_mining():
              "--rpcuser=rpcuser", "--rpcpass=rpcpass",
              "--rpclisten=0.0.0.0:44107",
              "--txindex",
+             "--notls",
              "--datadir=/root/.pearl"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )

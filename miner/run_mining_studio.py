@@ -93,6 +93,7 @@ def run_mining():
              "--rpcuser=rpcuser", "--rpcpass=rpcpass",
              "--rpclisten=0.0.0.0:44107",
              "--txindex",
+             "--notls",
              f"--datadir={DATA_DIR}"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
