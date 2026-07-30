@@ -1,16 +1,25 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # pearl-gemm build script
-# Usage: bash build.sh [--no-pull] [--jobs N]
-set -euo pipefail
+# Usage: sh build.sh [--no-pull] [--jobs N]
+set -eu
 
 PULL=true
 JOBS=4
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --no-pull) PULL=false; shift ;;
-        --jobs) JOBS="$2"; shift 2 ;;
-        *) echo "Unknown arg: $1"; exit 1 ;;
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-pull)
+            PULL=false
+            shift
+            ;;
+        --jobs)
+            JOBS="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown arg: $1"
+            exit 1
+            ;;
     esac
 done
 
