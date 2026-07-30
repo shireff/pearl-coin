@@ -11,6 +11,9 @@ No custom gateways, no invented REST endpoints.
 
 import argparse
 import os
+import subprocess
+import sys
+import time
 
 import torch
 from miner_base.block_submission import create_proof
@@ -21,64 +24,93 @@ from pearl_gateway.config import MinerRpcConfig
 from pearl_gemm import gpu_jackpot_hash, gpu_mine_batch, noise_gen
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Standalone Pearl GPU miner")
+DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
+DEFAULT_GATEWAY_TCP_PORT = 8337
 
-    parser.add_argument(
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Standalone Pearl GPU miner",
+    )
+
+    pearl_node = parser.add_argument_group("Pearl node connection")
+    pearl_node.add_argument("--rpc-url", default=None, help="Pearl node JSON-RPC URL, e.g. http://127.0.0.1:44107")
+    pearl_node.add_argument("--rpc-user", default=None, help="RPC username for pearl node")
+    pearl_node.add_argument("--rpc-password", default=None, help="RPC password for pearl node")
+    pearl_node.add_argument("--mining-address", default=None, help="Taproot mining address")
+
+    gateway = parser.add_argument_group("Gateway connection")
+    gateway.add_argument(
         "--gateway-socket",
-        default=os.environ.get("MINER_RPC_SOCKET_PATH", "/tmp/pearlgw.sock"),
+        default=os.environ.get("MINER_RPC_SOCKET_PATH", DEFAULT_GATEWAY_SOCKET),
         help="Unix socket path for pearl-gateway (default: /tmp/pearlgw.sock)",
     )
-    parser.add_argument(
-        "--gateway-host",
-        default=os.environ.get("MINER_RPC_HOST", "localhost"),
-        help="Gateway TCP host (used when --gateway-tcp is set)",
-    )
-    parser.add_argument(
-        "--gateway-port",
-        type=int,
-        default=int(os.environ.get("MINER_RPC_PORT", "8337")),
-        help="Gateway TCP port (used when --gateway-tcp is set)",
-    )
-    parser.add_argument(
+    gateway.add_argument(
         "--gateway-tcp",
         action="store_true",
         default=os.environ.get("MINER_RPC_TRANSPORT", "uds").lower() == "tcp",
         help="Use TCP instead of Unix socket for gateway connection",
     )
-    parser.add_argument(
-        "--noise-rank",
-        type=int,
-        default=int(os.environ.get("miner_noise_rank", "256")),
-        help="Noise rank dimension",
+    gateway.add_argument(
+        "--gateway-host",
+        default=os.environ.get("MINER_RPC_HOST", "localhost"),
+        help="Gateway TCP host (used when --gateway-tcp is set)",
     )
-    parser.add_argument(
-        "--noise-range",
+    gateway.add_argument(
+        "--gateway-port",
         type=int,
-        default=int(os.environ.get("miner_noise_range", "128")),
-        help="Noise range dimension",
-    )
-    parser.add_argument(
-        "--tile-m",
-        type=int,
-        default=int(os.environ.get("miner_tile_size_m", "256")),
-        help="GEMM tile M size",
-    )
-    parser.add_argument(
-        "--tile-n",
-        type=int,
-        default=int(os.environ.get("miner_tile_size_n", "1024")),
-        help="GEMM tile N size",
-    )
-    parser.add_argument(
-        "--tile-k",
-        type=int,
-        default=int(os.environ.get("miner_tile_size_k", "256")),
-        help="GEMM tile K size",
+        default=int(os.environ.get("MINER_RPC_PORT", str(DEFAULT_GATEWAY_TCP_PORT))),
+        help="Gateway TCP port (used when --gateway-tcp is set)",
     )
 
+    mining = parser.add_argument_group("Mining parameters")
+    mining.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "256")))
+    mining.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "128")))
+    mining.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "256")))
+    mining.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "1024")))
+    mining.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "256")))
+
     return parser.parse_args()
+
+
+def start_gateway_process(rpc_url, rpc_user, rpc_password, mining_address):
+    """Start pearl-gateway as a subprocess configured with the given pearl node settings."""
+    env = os.environ.copy()
+    if rpc_url is not None:
+        env["PEARLD_RPC_URL"] = rpc_url
+    if rpc_user is not None:
+        env["PEARLD_RPC_USER"] = rpc_user
+    if rpc_password is not None:
+        env["PEARLD_RPC_PASSWORD"] = rpc_password
+    if mining_address is not None:
+        env["PEARLD_MINING_ADDRESS"] = mining_address
+    env.setdefault("PEARL_LOG_LEVEL", "INFO")
+
+    cmd = [sys.executable, "-m", "pearl_gateway", "start"]
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc
+
+
+def wait_for_socket(socket_path, timeout=30):
+    start = time.time()
+    while time.time() - start < timeout:
+        if os.path.exists(socket_path):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def stream_logs(name, proc):
+    if proc.stdout is None:
+        return
+    for line in proc.stdout:
+        print(f"[{name}] {line}", end="", flush=True)
 
 
 def run_single_mining_round(
@@ -88,12 +120,6 @@ def run_single_mining_round(
     """Fetch one job from the gateway, mine it on GPU, submit proof."""
     mining_job: MiningJob = client.get_mining_info()
 
-    # Parse incomplete_header_bytes to obtain OpenedBlockInfo.
-    # The gateway supplies A and B_t matrices (non-noised) via the
-    # block header; for this standalone miner we assume the A/B tensors
-    # arrive as part of MiningJob metadata or are read from the header bytes.
-    # This placeholder uses the mining configuration from the client
-    # to derive the correct shapes.
     from pearl_gateway.comm.dataclasses import MiningConfiguration
 
     mining_config = MiningConfiguration(
@@ -109,7 +135,6 @@ def run_single_mining_round(
         noise_rank=settings.noise_rank,
     )
 
-    # ---- GPU mining (replaces vLLM noxious_gemm path) ----
     rank = settings.noise_rank
     noise_gen(R=rank, num_threads=64)
 
@@ -155,7 +180,6 @@ def run_single_mining_round(
         num_combos=num_combos,
     )
 
-    # ---- Winner check ----
     target_tensor = torch.tensor(
         [mining_job.target], dtype=torch.uint32, device="cuda"
     )
@@ -166,7 +190,6 @@ def run_single_mining_round(
     if winners.numel() == 0:
         return False
 
-    # ---- Build proof and submit ----
     plain_proof = create_proof(open_block, mining_job.incomplete_header_bytes)
     client.submit_plain_proof(plain_proof, mining_job)
     return True
@@ -178,34 +201,82 @@ def main():
     args = parse_args()
     logger = get_logger("miner_gpu")
 
-    rpc_config = MinerRpcConfig(
-        transport="tcp" if args.gateway_tcp else "uds",
-        socket_path=args.gateway_socket if not args.gateway_tcp else None,
-        host=args.gateway_host,
-        port=args.gateway_port,
-    )
-    settings = MinerSettings(
-        noise_range=args.noise_range,
-        noise_rank=args.noise_rank,
-        tile_size_m=args.tile_m,
-        tile_size_n=args.tile_n,
-        tile_size_k=args.tile_k,
-    )
-    client = MiningClient(rpc_config)
+    gateway_proc = None
+    managed_gateway = False
 
-    logger.info("Starting standalone GPU miner (no vLLM)")
-    logger.info(f"Gateway: {'tcp://' + args.gateway_host + ':' + str(args.gateway_port) if args.gateway_tcp else 'uds://' + args.gateway_socket}")
-    logger.info(f"Mining params: noise_range={args.noise_range}, noise_rank={args.noise_rank}, tile=({args.tile_m},{args.tile_n},{args.tile_k})")
+    try:
+        if args.rpc_url is not None:
+            managed_gateway = True
+            logger.info("Starting managed pearl-gateway process...")
+            gateway_proc = start_gateway_process(
+                args.rpc_url,
+                args.rpc_user,
+                args.rpc_password,
+                args.mining_address,
+            )
 
-    while True:
-        try:
-            run_single_mining_round(client, settings)
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            client.close()
-            break
-        except Exception as e:
-            logger.error("Mining round failed: %s", e)
+            socket_path = args.gateway_socket if not args.gateway_tcp else None
+            if not args.gateway_tcp:
+                if not wait_for_socket(socket_path, timeout=30):
+                    logger.error("Gateway socket %s never appeared", socket_path)
+                    return 1
+                logger.info("Gateway socket ready: %s", socket_path)
+            else:
+                time.sleep(2)
+                logger.info("Waiting for gateway TCP on %s:%s", args.gateway_host, args.gateway_port)
+
+        rpc_config = MinerRpcConfig(
+            transport="tcp" if args.gateway_tcp else "uds",
+            socket_path=args.gateway_socket if not args.gateway_tcp else None,
+            host=args.gateway_host,
+            port=args.gateway_port,
+        )
+        settings = MinerSettings(
+            noise_range=args.noise_range,
+            noise_rank=args.noise_rank,
+            tile_size_m=args.tile_m,
+            tile_size_n=args.tile_n,
+            tile_size_k=args.tile_k,
+        )
+        client = MiningClient(rpc_config)
+
+        logger.info("Starting standalone GPU miner (no vLLM)")
+        logger.info(
+            "Gateway: %s",
+            "tcp://" + args.gateway_host + ":" + str(args.gateway_port)
+            if args.gateway_tcp
+            else "uds://" + args.gateway_socket,
+        )
+        logger.info(
+            "Mining params: noise_range=%s, noise_rank=%s, tile=(%s,%s,%s)",
+            args.noise_range,
+            args.noise_rank,
+            args.tile_m,
+            args.tile_n,
+            args.tile_k,
+        )
+
+        while True:
+            try:
+                run_single_mining_round(client, settings)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                logger.error("Mining round failed: %s", e)
+
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        client.close()
+        if managed_gateway and gateway_proc is not None:
+            logger.info("Stopping managed gateway process...")
+            gateway_proc.terminate()
+            try:
+                gateway_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                gateway_proc.kill()
+        elif gateway_proc is not None:
+            stream_logs("gateway", gateway_proc)
 
 
 if __name__ == "__main__":

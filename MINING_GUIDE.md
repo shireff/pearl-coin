@@ -153,101 +153,46 @@ Verify it is running:
 
 > **Common failure:** If `pearl-gateway` logs `Failed to connect to Pearl node` or returns HTTP 401 / TLS errors, confirm that `pearld` was started with `--notls` and that the `rpcuser` / `rpcpass` match on both sides.
 
-### 2. Configure and start pearl-gateway
+### 2. Start the miner — this automatically starts pearl-gateway
 
-Set the environment variables that tell the gateway how to reach `pearld`:
+If `pearld` is already running, `miner_gpu.py` can manage `pearl-gateway` for you. Just pass the pearl node connection details:
 
 ```bash
-export PEARLD_RPC_URL="http://localhost:44107"
-export PEARLD_RPC_USER="rpcuser"
-export PEARLD_RPC_PASSWORD="rpcpass"
-export PEARLD_MINING_ADDRESS="<YOUR_WALLET_ADDRESS>"
-export PEARL_LOG_LEVEL="INFO"
+python miner/miner_gpu.py \
+  --rpc-url http://127.0.0.1:44107 \
+  --rpc-user rpcuser \
+  --rpc-password rpcpass \
+  --mining-address <YOUR_WALLET_ADDRESS>
 ```
 
-Start the gateway:
+`miner_gpu.py` starts `pearl-gateway` as a background process, waits for the gateway socket to appear, then begins mining.
+
+If you prefer to run `pearl-gateway` manually in a separate terminal, use its documented command instead:
 
 ```bash
 pearl-gateway start
 ```
 
-Wait until the Unix socket appears:
+### Environment Variables
 
-```bash
-# Linux / macOS
-ls -la /tmp/pearlgw.sock
+All values below can be passed either as CLI flags to `miner_gpu.py` or as environment variables.
 
-# Windows (if using TCP fallback)
-# Set MINER_RPC_TRANSPORT=tcp and check port 8337 is listening
-```
-
-### 3. Start the miner
-
-Run the standalone GPU miner:
-
-```bash
-python miner/miner_gpu.py
-```
-
-Or with `uv`:
-
-```bash
-uv run python miner/miner_gpu.py
-```
-
-The miner accepts CLI overrides for the gateway connection and mining parameters:
-
-```bash
-python miner/miner_gpu.py \
-  --gateway-socket /tmp/pearlgw.sock \
-  --noise-rank 256 \
-  --tile-m 256 \
-  --tile-n 1024
-```
-
-For TCP fallback (e.g., Windows or socket conflicts):
-
-```bash
-python miner/miner_gpu.py \
-  --gateway-tcp \
-  --gateway-host localhost \
-  --gateway-port 8337
-```
-
-## Environment Variables
-
-### pearl-gateway
-
-Set these in the terminal where you start `pearl-gateway`.
-
-| Variable | Default | Description |
+| Variable / Flag | Default | Description |
 |----------|---------|-------------|
-| `PEARLD_RPC_URL` | `http://0.0.0.0:44107` | Pearl node JSON-RPC endpoint |
-| `PEARLD_RPC_USER` | `user` | RPC username |
-| `PEARLD_RPC_PASSWORD` | `pass` | RPC password |
-| `PEARLD_MINING_ADDRESS` | `""` | Your Taproot mining address |
-| `MINER_RPC_TRANSPORT` | `uds` | Transport for miner connections: `uds` or `tcp` |
-| `MINER_RPC_SOCKET_PATH` | `/tmp/pearlgw.sock` | Unix socket path |
-| `MINER_RPC_PORT` | `8337` | TCP port (used when `MINER_RPC_TRANSPORT=tcp`) |
-| `MINER_RPC_HOST` | `localhost` | TCP bind host |
+| `PEARLD_RPC_URL` / `--rpc-url` | `http://0.0.0.0:44107` | Pearl node JSON-RPC endpoint |
+| `PEARLD_RPC_USER` / `--rpc-user` | `user` | RPC username |
+| `PEARLD_RPC_PASSWORD` / `--rpc-password` | `pass` | RPC password |
+| `PEARLD_MINING_ADDRESS` / `--mining-address` | `""` | Your Taproot mining address |
 | `PEARL_LOG_LEVEL` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARN`, `ERROR`, `NONE`) |
-
-### miner_gpu.py
-
-Set these in the terminal where you start the miner.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PEARL_LOG_LEVEL` | `INFO` | Log verbosity |
-| `miner_noise_range` | `128` | Noise range dimension |
-| `miner_noise_rank` | `256` | Noise rank |
-| `miner_tile_size_m` | `256` | GEMM tile M |
-| `miner_tile_size_n` | `1024` | GEMM tile N |
-| `miner_tile_size_k` | `256` | GEMM tile K |
-| `MINER_RPC_SOCKET_PATH` | `/tmp/pearlgw.sock` | Gateway Unix socket |
-| `MINER_RPC_TRANSPORT` | `uds` | Gateway transport (`uds` or `tcp`) |
-| `MINER_RPC_PORT` | `8337` | Gateway TCP port |
-| `MINER_RPC_HOST` | `localhost` | Gateway TCP host |
+| `MINER_RPC_SOCKET_PATH` / `--gateway-socket` | `/tmp/pearlgw.sock` | Gateway Unix socket |
+| `MINER_RPC_TRANSPORT` / `--gateway-tcp` | `uds` | Gateway transport (`uds` or `tcp` via `--gateway-tcp`) |
+| `MINER_RPC_PORT` / `--gateway-port` | `8337` | Gateway TCP port |
+| `MINER_RPC_HOST` / `--gateway-host` | `localhost` | Gateway TCP host |
+| `miner_noise_rank` / `--noise-rank` | `256` | Noise rank dimension |
+| `miner_noise_range` / `--noise-range` | `128` | Noise range dimension |
+| `miner_tile_size_m` / `--tile-m` | `256` | GEMM tile M |
+| `miner_tile_size_n` / `--tile-n` | `1024` | GEMM tile N |
+| `miner_tile_size_k` / `--tile-k` | `256` | GEMM tile K |
 
 ## Verifying the Installation
 
