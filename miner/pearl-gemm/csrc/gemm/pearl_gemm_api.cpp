@@ -1434,43 +1434,51 @@ at::Tensor gpu_generate_and_mine_batch(
 
 // CUDA Graph API for batch mining
 
- MiningGraphState* create_mining_graph_state(uint32_t num_candidates, uint32_t num_combos,
-                                             uint32_t tile_h, uint32_t tile_w,
-                                             uint32_t m, uint32_t n, uint32_t k, uint32_t rank) {
+// Helper to convert uintptr_t handle back to MiningGraphState* (matches PersistentPipeline pattern)
+static inline MiningGraphState* to_graph(uintptr_t h) {
+    return reinterpret_cast<MiningGraphState*>(h);
+}
+
+uintptr_t create_mining_graph_state(uint32_t num_candidates, uint32_t num_combos,
+                                    uint32_t tile_h, uint32_t tile_w,
+                                    uint32_t m, uint32_t n, uint32_t k, uint32_t rank) {
     size_t shared_mem_bytes = (tile_h * tile_w + JACKPOT_SIZE) * sizeof(int32_t);
     MiningGraphState* state = new MiningGraphState();
-    if (state == nullptr) return nullptr;
+    if (state == nullptr) return 0;
 
     cudaError_t err = pearl::mining::create_mining_graph(state, num_candidates, num_combos,
                                                          tile_h, tile_w, m, n, k, rank, shared_mem_bytes);
     if (err != cudaSuccess) {
         delete state;
-        return nullptr;
+        return 0;
     }
 
-    return state;
+    return reinterpret_cast<uintptr_t>(state);
 }
 
-void destroy_mining_graph_state(MiningGraphState* state) {
+void destroy_mining_graph_state(uintptr_t handle) {
+    MiningGraphState* state = to_graph(handle);
     if (state == nullptr) return;
     pearl::mining::destroy_mining_graph(state);
     delete state;
 }
 
-cudaError_t update_mining_graph_state(MiningGraphState* state, uint32_t num_candidates, uint32_t num_combos,
+cudaError_t update_mining_graph_state(uintptr_t handle, uint32_t num_candidates, uint32_t num_combos,
                                       uint32_t tile_h, uint32_t tile_w,
                                       uint32_t m, uint32_t n, uint32_t k, uint32_t rank) {
+    MiningGraphState* state = to_graph(handle);
     if (state == nullptr) return cudaErrorInvalidValue;
     size_t shared_mem_bytes = (tile_h * tile_w + JACKPOT_SIZE) * sizeof(int32_t);
     return pearl::mining::update_mining_graph(state, num_candidates, num_combos,
                                               tile_h, tile_w, m, n, k, rank, shared_mem_bytes);
 }
 
-cudaError_t launch_mining_graph_state(MiningGraphState* state,
+cudaError_t launch_mining_graph_state(uintptr_t handle,
                                       at::Tensor a_noised, at::Tensor b_noised_t,
                                       at::Tensor a_rows, at::Tensor b_cols,
                                       at::Tensor jobs, at::Tensor jackpots,
                                       at::Tensor keys, at::Tensor hashes) {
+    MiningGraphState* state = to_graph(handle);
     if (state == nullptr) return cudaErrorInvalidValue;
 
     CHECK_DEVICE(a_noised);
@@ -1495,7 +1503,8 @@ cudaError_t launch_mining_graph_state(MiningGraphState* state,
     );
 }
 
-cudaError_t synchronize_mining_graph_state(MiningGraphState* state) {
+cudaError_t synchronize_mining_graph_state(uintptr_t handle) {
+    MiningGraphState* state = to_graph(handle);
     if (state == nullptr) return cudaErrorInvalidValue;
     return pearl::mining::synchronize_mining_graph(state);
 }
