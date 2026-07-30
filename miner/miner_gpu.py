@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """Standalone GPU mining node without vLLM dependency.
 
-Uses existing miner-base and pearl-gateway infrastructure for
-job acquisition and proof submission. Replaces vLLM inference
-with direct pearl_gemm CUDA kernel calls:
-  noise_gen() → gpu_mine_batch() → gpu_jackpot_hash()
-
-No custom gateways, no invented REST endpoints.
+Uses CUDA Graph capture to eliminate per-round kernel launch overhead:
+  noise_gen() → [CUDA Graph: mine_batch + jackpot_hash] (captured once, replayed every round)
 """
 
 import argparse
-import inspect
 import os
 import subprocess
 import sys
@@ -18,7 +13,6 @@ import threading
 import time
 from pathlib import Path
 
-# Prefer local pearl_gemm source over any globally installed package.
 _local_root = Path(__file__).resolve().parent
 _local_pearl_gemm_src = str(_local_root.parent / "pearl-gemm" / "src")
 if _local_pearl_gemm_src not in sys.path:
@@ -29,17 +23,18 @@ from miner_base.gateway_client import MiningClient
 from miner_base.settings import MinerSettings
 from pearl_gateway.comm.dataclasses import MiningJob
 from pearl_gateway.config import MinerRpcConfig
-from pearl_gemm import gpu_jackpot_hash, gpu_mine_batch, noise_gen
-
+from pearl_gemm import (
+    noise_gen,
+    create_mining_graph,
+    launch_mining_graph,
+    synchronize_mining_graph,
+    destroy_mining_graph,
+)
 
 DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
 DEFAULT_GATEWAY_TCP_PORT = 8337
 SUPPORTED_NOISE_RANKS = (64, 128)
-SUPPORTED_NOISE_GEN_THREAD_COUNTS = (32, 64, 128)
 JOB_STRUCT_BYTES = 128
-DEFAULT_TILE_SIZE_M = 64
-DEFAULT_TILE_SIZE_N = 64
-DEFAULT_TILE_SIZE_K = 128
 DEFAULT_MAX_SHARED_MEMORY_BYTES = 100_000
 
 
@@ -53,60 +48,44 @@ def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = 
 
 
 def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
-    """Estimate shared memory bytes matching gpu_mining_launch.cu formula exactly.
-
-    shared_mem = (tile_h*tile_w + tile_h*(rank+1) + (rank+1)*tile_w + JACKPOT_SIZE) * 4
-    """
-    JACKPOT_SIZE = 16
+    """Match gpu_mining_launch.cu formula: (tile_h*tile_w + tile_h*(rank+1) + (rank+1)*tile_w + 16) * 4"""
     smem_a_pitch = tile_h * (rank + 1)
     smem_b_pitch = (rank + 1) * tile_w
-    return (tile_h * tile_w + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * 4
+    return (tile_h * tile_w + smem_a_pitch + smem_b_pitch + 16) * 4
 
 
 def get_cuda_shared_memory_limit() -> int:
-    """Return max dynamic shared memory per block (opt-in) for device 0."""
     try:
         if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
             return DEFAULT_MAX_SHARED_MEMORY_BYTES
         device_idx = torch.cuda.current_device()
-        # Try ctypes path: cudaDevAttrMaxSharedMemoryPerBlockOptin = 78
         import ctypes
         try:
             _libcuda = ctypes.CDLL("libcuda.so.1")
             _val = ctypes.c_int(0)
-            # cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev)
             # CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97
-            ret = _libcuda.cuDeviceGetAttribute(
-                ctypes.byref(_val), ctypes.c_int(97), ctypes.c_int(device_idx)
-            )
-            if ret == 0 and _val.value > 0:
+            if _libcuda.cuDeviceGetAttribute(ctypes.byref(_val), ctypes.c_int(97), ctypes.c_int(device_idx)) == 0 and _val.value > 0:
                 return _val.value
         except Exception:
             pass
-        # Fallback: use cudart path
         try:
-            import ctypes.util
             _libcudart = ctypes.CDLL("libcudart.so")
             _val = ctypes.c_int(0)
             # cudaDevAttrMaxSharedMemoryPerBlockOptin = 78
-            ret = _libcudart.cudaDeviceGetAttribute(
-                ctypes.byref(_val), ctypes.c_int(78), ctypes.c_int(device_idx)
-            )
-            if ret == 0 and _val.value > 0:
+            if _libcudart.cudaDeviceGetAttribute(ctypes.byref(_val), ctypes.c_int(78), ctypes.c_int(device_idx)) == 0 and _val.value > 0:
                 return _val.value
         except Exception:
             pass
-        # Final fallback: use sm version heuristic
         props = torch.cuda.get_device_properties(device_idx)
         sm = props.major * 10 + props.minor
-        if sm >= 90:    # Hopper/Blackwell: 232 KB
+        if sm >= 90:
             return 232 * 1024
-        elif sm >= 80:  # Ampere: 163 KB
+        elif sm >= 80:
             return 163 * 1024
-        elif sm >= 70:  # Volta/Turing: 96 KB
+        elif sm >= 70:
             return 96 * 1024
-        else:           # older: 64 KB
-            return 64 * 1024
+        else:
+            return 100 * 1024
     except Exception:
         pass
     return DEFAULT_MAX_SHARED_MEMORY_BYTES
@@ -115,111 +94,58 @@ def get_cuda_shared_memory_limit() -> int:
 def get_gpu_name() -> str | None:
     try:
         if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            props = torch.cuda.get_device_properties(0)
-            return props.name
+            return torch.cuda.get_device_properties(0).name
     except Exception:
         pass
     return None
 
 
 def choose_safe_tile_size(tile_h: int, tile_w: int, rank: int, shared_mem_limit: int) -> tuple[int, int]:
-    """Return the largest tile size that fits in shared memory.
-
-    Ordered largest→smallest. tile (16,16) triggers the fast WMMA fused path
-    in launch_gpu_mining (requires exactly tile_h==16, tile_w==16).
-    """
+    """Return the largest tile that fits in shared memory. (16,16) triggers WMMA fused path."""
     if estimate_shared_mem_bytes(tile_h, tile_w, rank) <= shared_mem_limit:
         return tile_h, tile_w
-
-    # Ordered largest to smallest — pick first that fits
-    for candidate in (
-        (128, 128),
-        (64, 64),
-        (32, 32),
-        (16, 16),  # triggers WMMA fused path in launch_gpu_mining
-    ):
+    for candidate in ((128, 128), (64, 64), (32, 32), (16, 16)):
         if estimate_shared_mem_bytes(candidate[0], candidate[1], rank) <= shared_mem_limit:
             return candidate
-
     return 16, 16
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Standalone Pearl GPU miner",
-    )
-
-    pearl_node = parser.add_argument_group("Pearl node connection")
-    pearl_node.add_argument("--rpc-url", default=None, help="Pearl node JSON-RPC URL, e.g. http://127.0.0.1:44107")
-    pearl_node.add_argument("--rpc-user", default=None, help="RPC username for pearl node")
-    pearl_node.add_argument("--rpc-password", default=None, help="RPC password for pearl node")
-    pearl_node.add_argument("--mining-address", default=None, help="Taproot mining address")
-
-    gateway = parser.add_argument_group("Gateway connection")
-    gateway.add_argument(
-        "--gateway-socket",
-        default=os.environ.get("MINER_RPC_SOCKET_PATH", DEFAULT_GATEWAY_SOCKET),
-        help="Unix socket path for pearl-gateway (default: /tmp/pearlgw.sock)",
-    )
-    gateway.add_argument(
-        "--gateway-tcp",
-        action="store_true",
-        default=os.environ.get("MINER_RPC_TRANSPORT", "uds").lower() == "tcp",
-        help="Use TCP instead of Unix socket for gateway connection",
-    )
-    gateway.add_argument(
-        "--gateway-host",
-        default=os.environ.get("MINER_RPC_HOST", "localhost"),
-        help="Gateway TCP host (used when --gateway-tcp is set)",
-    )
-    gateway.add_argument(
-        "--gateway-port",
-        type=int,
-        default=int(os.environ.get("MINER_RPC_PORT", str(DEFAULT_GATEWAY_TCP_PORT))),
-        help="Gateway TCP port (used when --gateway-tcp is set)",
-    )
-
-    mining = parser.add_argument_group("Mining parameters")
-    mining.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "128")))
-    mining.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "128")))
-    mining.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "64")))
-    mining.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "64")))
-    mining.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "128")))
-
+    parser = argparse.ArgumentParser(description="Standalone Pearl GPU miner")
+    g = parser.add_argument_group("Pearl node connection")
+    g.add_argument("--rpc-url", default=None)
+    g.add_argument("--rpc-user", default=None)
+    g.add_argument("--rpc-password", default=None)
+    g.add_argument("--mining-address", default=None)
+    g = parser.add_argument_group("Gateway connection")
+    g.add_argument("--gateway-socket", default=os.environ.get("MINER_RPC_SOCKET_PATH", DEFAULT_GATEWAY_SOCKET))
+    g.add_argument("--gateway-tcp", action="store_true", default=os.environ.get("MINER_RPC_TRANSPORT", "uds").lower() == "tcp")
+    g.add_argument("--gateway-host", default=os.environ.get("MINER_RPC_HOST", "localhost"))
+    g.add_argument("--gateway-port", type=int, default=int(os.environ.get("MINER_RPC_PORT", str(DEFAULT_GATEWAY_TCP_PORT))))
+    g = parser.add_argument_group("Mining parameters")
+    g.add_argument("--noise-rank", type=int, default=int(os.environ.get("miner_noise_rank", "128")))
+    g.add_argument("--noise-range", type=int, default=int(os.environ.get("miner_noise_range", "128")))
+    g.add_argument("--tile-m", type=int, default=int(os.environ.get("miner_tile_size_m", "64")))
+    g.add_argument("--tile-n", type=int, default=int(os.environ.get("miner_tile_size_n", "64")))
+    g.add_argument("--tile-k", type=int, default=int(os.environ.get("miner_tile_size_k", "128")))
     return parser.parse_args()
 
 
 def start_gateway_process(rpc_url, rpc_user, rpc_password, mining_address):
-    """Start pearl-gateway as a subprocess configured with the given pearl node settings."""
     env = os.environ.copy()
-    if rpc_url is not None:
+    if rpc_url:
         env["PEARLD_RPC_URL"] = rpc_url
-    if rpc_user is not None:
+    if rpc_user:
         env["PEARLD_RPC_USER"] = rpc_user
-    if rpc_password is not None:
+    if rpc_password:
         env["PEARLD_RPC_PASSWORD"] = rpc_password
-    if mining_address is not None:
+    if mining_address:
         env["PEARLD_MINING_ADDRESS"] = mining_address
     env.setdefault("PEARL_LOG_LEVEL", "INFO")
-
-    cmd = [sys.executable, "-m", "pearl_gateway", "start"]
-    proc = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+    return subprocess.Popen(
+        [sys.executable, "-m", "pearl_gateway", "start"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
-    return proc
-
-
-def wait_for_socket(socket_path, timeout=30):
-    start = time.time()
-    while time.time() - start < timeout:
-        if os.path.exists(socket_path):
-            return True
-        time.sleep(0.5)
-    return False
 
 
 def stream_logs(name, proc):
@@ -230,16 +156,16 @@ def stream_logs(name, proc):
 
 
 def wait_for_gateway_socket(proc, socket_path, timeout=30, logger=None):
-    """Wait for gateway socket while streaming logs and checking process health."""
     start = time.time()
     while time.time() - start < timeout:
         if os.path.exists(socket_path):
             return True
         if proc.poll() is not None:
-            if logger is not None:
-                logger.error("Managed pearl-gateway exited early with code %s", proc.returncode)
+            msg = f"Managed pearl-gateway exited early with code {proc.returncode}"
+            if logger:
+                logger.error(msg)
             else:
-                print(f"Managed pearl-gateway exited early with code {proc.returncode}")
+                print(msg)
             if proc.stdout:
                 remaining = proc.stdout.read()
                 if remaining:
@@ -249,139 +175,97 @@ def wait_for_gateway_socket(proc, socket_path, timeout=30, logger=None):
     return False
 
 
-def run_single_mining_round(
-    client: MiningClient,
-    settings: MinerSettings,
-) -> bool:
-    """Fetch one job from the gateway, mine it on GPU, submit proof."""
-    mining_job: MiningJob = client.get_mining_info()
+class MiningGraphSession:
+    """Allocates all GPU buffers once, captures the CUDA Graph once,
+    then replays it every round — no realloc, no per-kernel sync."""
 
-    rank  = settings.noise_rank
-    # m/n/k are the matrix inner dimensions — must equal noise_range.
-    # tile_h/tile_w are the output tile dimensions used by gpu_mine_batch.
-    m     = settings.noise_range
-    n     = settings.noise_range
-    k     = settings.noise_range
-    tile_h = settings.tile_size_m
-    tile_w = settings.tile_size_n
+    def __init__(self, settings: MinerSettings, num_jobs: int = 1, P: int = 1, Q: int = 1):
+        self.num_jobs = num_jobs
+        self.num_combos = P * Q
+        rank = settings.noise_rank
+        m = n = k = settings.noise_range
+        tile_h = settings.tile_size_m
+        tile_w = settings.tile_size_n
+        self.rank = rank
+        self.m = self.n = self.k = m
+        self.tile_h = tile_h
+        self.tile_w = tile_w
 
-    if rank not in SUPPORTED_NOISE_RANKS:
-        nearest_rank = min(SUPPORTED_NOISE_RANKS, key=lambda supported: abs(supported - rank))
-        print(
-            f"[WARN] Unsupported noise rank {rank}; switching to supported rank {nearest_rank}. "
-            f"Supported values are {SUPPORTED_NOISE_RANKS}."
+        self.EAL         = torch.empty((m, rank), dtype=torch.int8,    device="cuda")
+        self.EAL_fp16    = torch.empty((m, rank), dtype=torch.float16, device="cuda")
+        self.EBR         = torch.empty((n, rank), dtype=torch.int8,    device="cuda")
+        self.EBR_fp16    = torch.empty((n, rank), dtype=torch.float16, device="cuda")
+        self.EAR_R_major = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
+        self.EAR_K_major = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
+        self.EBL_R_major = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
+        self.EBL_K_major = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
+        self.key_A       = allocate_aligned_byte_tensor(32, align=16, device="cuda")
+        self.key_B       = allocate_aligned_byte_tensor(32, align=16, device="cuda")
+
+        self.A_noised   = torch.zeros((num_jobs, m, k), dtype=torch.int32, device="cuda")
+        self.B_noised_t = torch.zeros((num_jobs, n, k), dtype=torch.int32, device="cuda")
+        self.a_rows     = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)
+        self.b_cols     = torch.arange(tile_w, dtype=torch.int32, device="cuda").unsqueeze(0)
+        self.jobs       = allocate_aligned_byte_tensor(JOB_STRUCT_BYTES, align=16, device="cuda")
+        self.jackpots   = torch.empty((num_jobs, self.num_combos, 16), dtype=torch.uint32, device="cuda")
+        self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
+        self.hashes     = torch.empty((num_jobs, self.num_combos, 8), dtype=torch.uint32, device="cuda")
+
+        smem = estimate_shared_mem_bytes(tile_h, tile_w, rank)
+        self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank, smem)
+        if self.graph_state is None:
+            raise RuntimeError(
+                f"create_mining_graph failed for tile=({tile_h},{tile_w}) smem={smem} bytes — "
+                f"try smaller tile size"
+            )
+
+    def run_round(self, mining_job: MiningJob) -> bool:
+        self.key_A.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
+        self.key_B.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
+        noise_gen(
+            R=self.rank, num_threads=64,
+            EAL=self.EAL, EAL_fp16=self.EAL_fp16,
+            EAR_R_major=self.EAR_R_major, EAR_K_major=self.EAR_K_major,
+            EBL_R_major=self.EBL_R_major, EBL_K_major=self.EBL_K_major,
+            EBR=self.EBR, EBR_fp16=self.EBR_fp16,
+            key_A=self.key_A, key_B=self.key_B,
         )
-        rank = nearest_rank
+        err = launch_mining_graph(
+            self.graph_state,
+            self.A_noised, self.B_noised_t,
+            self.a_rows, self.b_cols,
+            self.jobs, self.jackpots, self.keys, self.hashes,
+        )
+        if err != 0:
+            raise RuntimeError(f"launch_mining_graph failed: cudaError {err}")
+        synchronize_mining_graph(self.graph_state)
 
-    # ── Allocate noise matrices ──────────────────────────────────────────────
-    EAL          = torch.empty((m, rank), dtype=torch.int8,    device="cuda")
-    EAL_fp16     = torch.empty((m, rank), dtype=torch.float16, device="cuda")
-    EBR          = torch.empty((n, rank), dtype=torch.int8,    device="cuda")
-    EBR_fp16     = torch.empty((n, rank), dtype=torch.float16, device="cuda")
-    EAR_R_major  = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
-    EAR_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
-    EBL_R_major  = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
-    EBL_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
-    key_A        = allocate_aligned_byte_tensor(32, align=16, device="cuda")
-    key_B        = allocate_aligned_byte_tensor(32, align=16, device="cuda")
-    key_A.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
-    key_B.copy_(torch.randint(0, 256, (32,), dtype=torch.uint8, device="cuda"))
+        _target_int = int(mining_job.target)
+        target_words = [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
+        target_tensor = torch.tensor(target_words, dtype=torch.int64, device="cuda")
+        hashes_i64 = self.hashes.squeeze(0).to(torch.int64)
+        winners = torch.nonzero(
+            (hashes_i64 <= target_tensor.unsqueeze(0)).all(dim=-1), as_tuple=False
+        )
+        return winners.numel() > 0
 
-    # ── Generate noise on GPU ────────────────────────────────────────────────
-    kernel_start = time.time()
-    noise_gen(
-        R=rank,
-        num_threads=64,
-        EAL=EAL,
-        EAL_fp16=EAL_fp16,
-        EAR_R_major=EAR_R_major,
-        EAR_K_major=EAR_K_major,
-        EBL_R_major=EBL_R_major,
-        EBL_K_major=EBL_K_major,
-        EBR=EBR,
-        EBR_fp16=EBR_fp16,
-        key_A=key_A,
-        key_B=key_B,
-    )
+    def build_proof(self, mining_job: MiningJob):
+        from pearl_gateway.comm.dataclasses import OpenedBlockInfo
+        from miner_base.block_submission import create_proof
+        open_block = OpenedBlockInfo(
+            A=self.A_noised.cpu().numpy(),
+            B_t=self.B_noised_t.cpu().numpy(),
+            A_row_indices=self.a_rows.squeeze(0).cpu().tolist(),
+            B_column_indices=self.b_cols.squeeze(0).cpu().tolist(),
+            commitment_hash=None,
+            noise_rank=self.rank,
+        )
+        return create_proof(open_block, mining_job.incomplete_header_bytes)
 
-    # ── Allocate noised A / B matrices ───────────────────────────────────────
-    A_noised   = torch.zeros((1, m, k), dtype=torch.int32, device="cuda")
-    B_noised_t = torch.zeros((1, n, k), dtype=torch.int32, device="cuda")
-
-    # ── Mine: row/col indices for the tile ───────────────────────────────────
-    a_rows = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_h)
-    b_cols = torch.arange(tile_w, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_w)
-
-    jobs_buffer = allocate_aligned_byte_tensor(JOB_STRUCT_BYTES, align=16, device="cuda")
-    jackpots = gpu_mine_batch(
-        a_noised=A_noised,
-        b_noised_t=B_noised_t,
-        a_rows_data=a_rows,
-        b_cols_data=b_cols,
-        jobs=jobs_buffer,
-        num_jobs=1,
-        P=1,
-        Q=1,
-        tile_h=tile_h,
-        tile_w=tile_w,
-        m=m,
-        n=n,
-        k=k,
-        rank=rank,
-    )
-    gpu_mine_batch_time = time.time() - kernel_start
-
-    # ── Hash jackpots ────────────────────────────────────────────────────────
-    keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
-    hashes = gpu_jackpot_hash(jackpots, keys)
-
-    elapsed = time.time() - kernel_start
-    tmok    = (tile_h * tile_w) / rank / 1000.0
-
-    logger = None
-    try:
-        from miner_utils import get_logger
-        logger = get_logger("miner_gpu")
-    except Exception:
-        pass
-
-    tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
-    if logger is not None:
-        logger.info(f"GPU round time: {elapsed:.3f}s, tmok/s={tmok_per_s:.2f}")
-    else:
-        print(f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok_per_s:.2f}")
-
-    # ── Check for winner ─────────────────────────────────────────────────────
-    # mining_job.target is a uint256 integer — unpack into 8 × uint32 (little-endian words)
-    _target_int = int(mining_job.target)
-    _target_words = [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
-    # Cast to int64 — PyTorch does not support <= for uint32
-    target_tensor = torch.tensor(_target_words, dtype=torch.int64, device="cuda")  # (8,)
-    # hashes shape: (num_jobs, num_combos, 8) uint32 → cast to int64 for comparison
-    hashes_i64 = hashes.squeeze(0).to(torch.int64)  # (num_combos, 8)
-    # A hash wins if every word is <= the corresponding target word (big-endian comparison)
-    winners = torch.nonzero(
-        (hashes_i64 <= target_tensor.unsqueeze(0)).all(dim=-1),
-        as_tuple=False,
-    )
-
-    if winners.numel() == 0:
-        return False
-
-    # ── Build open_block with actual matrix data for proof ───────────────────
-    from pearl_gateway.comm.dataclasses import OpenedBlockInfo
-    open_block = OpenedBlockInfo(
-        A=A_noised.cpu().numpy(),
-        B_t=B_noised_t.cpu().numpy(),
-        A_row_indices=a_rows.squeeze(0).cpu().tolist(),
-        B_column_indices=b_cols.squeeze(0).cpu().tolist(),
-        commitment_hash=None,
-        noise_rank=rank,
-    )
-    from miner_base.block_submission import create_proof
-    plain_proof = create_proof(open_block, mining_job.incomplete_header_bytes)
-    client.submit_plain_proof(plain_proof, mining_job)
-    return True
+    def close(self):
+        if self.graph_state is not None:
+            destroy_mining_graph(self.graph_state)
+            self.graph_state = None
 
 
 def main():
@@ -393,37 +277,27 @@ def main():
     client = None
     gateway_proc = None
     managed_gateway = False
-    log_thread = None
+    session = None
 
     try:
         if args.rpc_url is not None:
             managed_gateway = True
             socket_path = args.gateway_socket if not args.gateway_tcp else None
-
             if not args.gateway_tcp and os.path.exists(socket_path):
                 os.remove(socket_path)
-
             logger.info("Starting managed pearl-gateway process...")
             gateway_proc = start_gateway_process(
-                args.rpc_url,
-                args.rpc_user,
-                args.rpc_password,
-                args.mining_address,
+                args.rpc_url, args.rpc_user, args.rpc_password, args.mining_address,
             )
-
             if not args.gateway_tcp:
-                log_thread = threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True)
-                log_thread.start()
-
+                threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
                 if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30, logger=logger):
                     logger.error("Gateway socket %s never appeared", socket_path)
                     return 1
                 logger.info("Gateway socket ready: %s", socket_path)
             else:
-                log_thread = threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True)
-                log_thread.start()
+                threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
                 time.sleep(2)
-                logger.info("Waiting for gateway TCP on %s:%s", args.gateway_host, args.gateway_port)
 
         rpc_config = MinerRpcConfig(
             transport="tcp" if args.gateway_tcp else "uds",
@@ -437,12 +311,12 @@ def main():
         tile_m, tile_n = choose_safe_tile_size(args.tile_m, args.tile_n, args.noise_rank, shared_mem_limit)
         if (tile_m, tile_n) != (args.tile_m, args.tile_n):
             logger.warning(
-                "Requested tile size (%s,%s) is unsafe for this GPU; using safe tile size (%s,%s).",
-                args.tile_m, args.tile_n, tile_m, tile_n,
+                "Tile (%s,%s) exceeds GPU shared memory (%d KB) — using (%s,%s)",
+                args.tile_m, args.tile_n, shared_mem_limit // 1024, tile_m, tile_n,
             )
 
-        if gpu_name is not None:
-            logger.info("Detected GPU: %s, shared_mem_limit=%s", gpu_name, shared_mem_limit)
+        logger.info("GPU: %s  shared_mem_limit=%d KB", gpu_name or "unknown", shared_mem_limit // 1024)
+        logger.info("tile=(%d,%d)  rank=%d  noise_range=%d", tile_m, tile_n, args.noise_rank, args.noise_range)
 
         settings = MinerSettings(
             noise_range=args.noise_range,
@@ -453,29 +327,28 @@ def main():
         )
         client = MiningClient(rpc_config)
 
-        logger.info("Starting standalone GPU miner (no vLLM)")
-        logger.info(
-            "Gateway: %s",
-            "tcp://" + args.gateway_host + ":" + str(args.gateway_port)
-            if args.gateway_tcp
-            else "uds://" + args.gateway_socket,
-        )
-        logger.info(
-            "Mining params: noise_range=%s, noise_rank=%s, tile=(%s,%s,%s)",
-            args.noise_range,
-            args.noise_rank,
-            args.tile_m,
-            args.tile_n,
-            args.tile_k,
-        )
+        logger.info("Initialising CUDA Graph session...")
+        session = MiningGraphSession(settings, num_jobs=1, P=1, Q=1)
+        smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
+        logger.info("CUDA Graph ready — tile=(%d,%d)  smem=%d KB", session.tile_h, session.tile_w, smem_kb)
 
         while True:
             try:
-                run_single_mining_round(client, settings)
+                mining_job: MiningJob = client.get_mining_info()
+                t0 = time.time()
+                won = session.run_round(mining_job)
+                elapsed = time.time() - t0
+                tmok = (session.tile_h * session.tile_w) / session.rank / 1000.0
+                tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
+                logger.info(f"GPU round time: {elapsed:.3f}s, tmok/s={tmok_per_s:.2f}")
+                if won:
+                    plain_proof = session.build_proof(mining_job)
+                    client.submit_plain_proof(plain_proof, mining_job)
+                    logger.info("Block found and submitted!")
             except KeyboardInterrupt:
                 raise
-            except BrokenPipeError as exc:
-                logger.warning("Gateway connection lost (BrokenPipeError) — reconnecting in 3s...")
+            except BrokenPipeError:
+                logger.warning("Gateway connection lost — reconnecting in 3s...")
                 time.sleep(3)
                 try:
                     client.close()
@@ -484,20 +357,20 @@ def main():
                 try:
                     client = MiningClient(rpc_config)
                     logger.info("Reconnected to gateway")
-                except Exception as reconnect_exc:
-                    logger.error(f"Reconnect failed: {reconnect_exc}")
+                except Exception as e:
+                    logger.error(f"Reconnect failed: {e}")
             except Exception as exc:
                 import traceback as _tb
                 tb = _tb.extract_tb(exc.__traceback__)
                 last = tb[-1] if tb else None
                 location = f"{last.filename}:{last.lineno} in {last.name}" if last else "unknown"
-                logger.error(
-                    f"Mining round failed — {type(exc).__name__}: {exc}  [at {location}]"
-                )
+                logger.error(f"Mining round failed — {type(exc).__name__}: {exc}  [at {location}]")
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        if session is not None:
+            session.close()
         if client is not None:
             client.close()
         if managed_gateway and gateway_proc is not None:
@@ -512,7 +385,6 @@ def main():
 if __name__ == "__main__":
     import sys as _sys
     import traceback as _tb
-
     try:
         main()
     except SystemExit:
