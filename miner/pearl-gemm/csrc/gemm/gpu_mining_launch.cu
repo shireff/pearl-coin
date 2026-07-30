@@ -47,8 +47,9 @@
         }
 
         const int tile_size = tile_h * tile_w;
-        const int smem_a_pitch = tile_h * (rank + 1);
-        const int smem_b_pitch = (rank + 1) * tile_w;
+        auto align4 = [](int x) { return (x + 3) & ~3; };
+        const int smem_a_pitch = tile_h * align4(rank + 1);
+        const int smem_b_pitch = align4(rank + 1) * tile_w;
         const size_t shared_mem_bytes =
             (tile_size + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * sizeof(int32_t);
 

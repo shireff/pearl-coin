@@ -45,10 +45,11 @@ def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = 
 
 
 def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
+    aligned_rank = ((rank + 1 + 3) // 4) * 4
     return (
         tile_h * tile_w
-        + tile_h * (rank + 1)
-        + (rank + 1) * tile_w
+        + tile_h * aligned_rank
+        + aligned_rank * tile_w
         + 16
     ) * 4
 
@@ -56,7 +57,7 @@ def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
 def get_cuda_shared_memory_limit() -> int:
     try:
         if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            props = torch.cuda.get_device_properties(0)
+            props = torch.cuda.get_device_properties(torch.cuda.current_device())
             return int(
                 getattr(props, "max_shared_memory_per_block", None)
                 or getattr(props, "shared_memory_per_block", None)

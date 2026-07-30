@@ -20,6 +20,12 @@ __device__ __forceinline__ int32_t horizontal_sum_int4(int4 v) {
     return v.x + v.y + v.z + v.w;
 }
 
+__device__ __forceinline__ uint32_t load_u32_unaligned(const int8_t* ptr) {
+    uint32_t value;
+    memcpy(&value, ptr, sizeof(value));
+    return value;
+}
+
 // FIX #5/#9: use __dp4a for every 4-byte chunk (DP4A = INT8 dot product, one
 // clock on SM80+/SM120). #pragma unroll 1 on the outer combo/step loops below
 // prevents the compiler from duplicating the large loop body, reducing register
@@ -30,14 +36,14 @@ __device__ __forceinline__ int32_t dot_rank_i8_vectorized(const int8_t* a_vec, c
     int l = 0;
     #pragma unroll 1
     for (; l + 15 < rank; l += 16) {
-        const uint32_t a0 = *reinterpret_cast<const uint32_t*>(a_vec + l);
-        const uint32_t a1 = *reinterpret_cast<const uint32_t*>(a_vec + l + 4);
-        const uint32_t a2 = *reinterpret_cast<const uint32_t*>(a_vec + l + 8);
-        const uint32_t a3 = *reinterpret_cast<const uint32_t*>(a_vec + l + 12);
-        const uint32_t b0 = *reinterpret_cast<const uint32_t*>(b_vec + l);
-        const uint32_t b1 = *reinterpret_cast<const uint32_t*>(b_vec + l + 4);
-        const uint32_t b2 = *reinterpret_cast<const uint32_t*>(b_vec + l + 8);
-        const uint32_t b3 = *reinterpret_cast<const uint32_t*>(b_vec + l + 12);
+        const uint32_t a0 = load_u32_unaligned(a_vec + l);
+        const uint32_t a1 = load_u32_unaligned(a_vec + l + 4);
+        const uint32_t a2 = load_u32_unaligned(a_vec + l + 8);
+        const uint32_t a3 = load_u32_unaligned(a_vec + l + 12);
+        const uint32_t b0 = load_u32_unaligned(b_vec + l);
+        const uint32_t b1 = load_u32_unaligned(b_vec + l + 4);
+        const uint32_t b2 = load_u32_unaligned(b_vec + l + 8);
+        const uint32_t b3 = load_u32_unaligned(b_vec + l + 12);
         acc = __dp4a(a0, b0, acc);
         acc = __dp4a(a1, b1, acc);
         acc = __dp4a(a2, b2, acc);
@@ -45,8 +51,8 @@ __device__ __forceinline__ int32_t dot_rank_i8_vectorized(const int8_t* a_vec, c
     }
     #pragma unroll 1
     for (; l + 3 < rank; l += 4) {
-        const uint32_t a0 = *reinterpret_cast<const uint32_t*>(a_vec + l);
-        const uint32_t b0 = *reinterpret_cast<const uint32_t*>(b_vec + l);
+        const uint32_t a0 = load_u32_unaligned(a_vec + l);
+        const uint32_t b0 = load_u32_unaligned(b_vec + l);
         acc = __dp4a(a0, b0, acc);
     }
     for (; l < rank; l++) {
@@ -91,8 +97,9 @@ void gpu_mining_kernel(
 
     extern __shared__ int32_t smem[];
 
-    const int smem_a_pitch = tile_h * (rank + 1);
-    const int smem_b_pitch = (rank + 1) * tile_w;
+    auto align4 = [](int x) { return (x + 3) & ~3; };
+    const int smem_a_pitch = tile_h * align4(rank + 1);
+    const int smem_b_pitch = align4(rank + 1) * tile_w;
     int32_t* s_result = smem;
     int8_t* s_a = reinterpret_cast<int8_t*>(smem + tile_size);
     int8_t* s_b = reinterpret_cast<int8_t*>(smem + tile_size + smem_a_pitch);
