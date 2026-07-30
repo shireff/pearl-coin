@@ -35,6 +35,15 @@ DEFAULT_TILE_SIZE_K = 128
 DEFAULT_MAX_SHARED_MEMORY_BYTES = 100_000
 
 
+def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = "cuda") -> torch.Tensor:
+    buffer = torch.empty(num_bytes + align - 1, dtype=torch.uint8, device=device)
+    ptr = buffer.data_ptr()
+    offset = (-ptr) % align
+    if offset == 0:
+        return buffer[:num_bytes]
+    return buffer[offset:offset + num_bytes]
+
+
 def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
     return (
         tile_h * tile_w
@@ -245,12 +254,13 @@ def run_single_mining_round(
     a_rows = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_h)
     b_cols = torch.arange(tile_w, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_w)
 
+    jobs_buffer = allocate_aligned_byte_tensor(JOB_STRUCT_BYTES, align=16, device="cuda")
     jackpots = gpu_mine_batch(
         a_noised=A_noised,
         b_noised_t=B_noised_t,
         a_rows_data=a_rows,
         b_cols_data=b_cols,
-        jobs=torch.zeros((1, JOB_STRUCT_BYTES), dtype=torch.uint8, device="cuda"),
+        jobs=jobs_buffer,
         num_jobs=1,
         P=1,
         Q=1,
