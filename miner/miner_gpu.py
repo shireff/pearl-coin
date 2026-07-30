@@ -188,8 +188,8 @@ def run_single_mining_round(
     )
 
     # ── Allocate noised A / B matrices ───────────────────────────────────────
-    A_noised   = torch.zeros((m, k), dtype=torch.int32, device="cuda")
-    B_noised_t = torch.zeros((n, k), dtype=torch.int32, device="cuda")
+    A_noised   = torch.zeros((1, m, k), dtype=torch.int32, device="cuda")
+    B_noised_t = torch.zeros((1, n, k), dtype=torch.int32, device="cuda")
 
     # ── Mine: row/col indices for the tile ───────────────────────────────────
     a_rows = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_h)
