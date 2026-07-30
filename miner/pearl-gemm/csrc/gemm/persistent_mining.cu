@@ -4,6 +4,9 @@
 #include <atomic>
 #include <cuda_runtime_api.h>
 
+namespace pearl {
+namespace persistent {
+
 constexpr uint32_t JOB_STATUS_PENDING = 0;
 constexpr uint32_t JOB_STATUS_RUNNING = 1;
 constexpr uint32_t JOB_STATUS_DONE = 2;
@@ -176,3 +179,6 @@ __global__ void persistent_mining_kernel_v2(
         jobs[job_id].status = JOB_STATUS_DONE;
     }
 }
+
+} // namespace persistent
+} // namespace pearl
