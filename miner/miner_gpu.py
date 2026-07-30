@@ -293,8 +293,8 @@ def main():
                 run_single_mining_round(client, settings)
             except KeyboardInterrupt:
                 raise
-            except Exception as e:
-                logger.error("Mining round failed: %s", e)
+            except Exception:
+                logger.exception("Mining round failed")
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
