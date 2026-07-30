@@ -50,12 +50,12 @@ def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = 
 def estimate_shared_mem_bytes(tile_h: int, tile_w: int, rank: int) -> int:
     """Match gpu_mining_launch.cu formula exactly, including align4 padding.
 
-    align4(x) = (x + 3) & ~3  — rounds up to next multiple of 4
+    align4(x) = (x + 3) & ~3
     smem_a_pitch = tile_h * align4(rank + 1)
     smem_b_pitch = align4(rank + 1) * tile_w
-    total = (tile_h*tile_w + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * sizeof(int32_t)
+    total = (tile_h*tile_w + smem_a_pitch + smem_b_pitch + JACKPOT_SIZE) * 4
     """
-    aligned_rank_plus_1 = (rank + 1 + 3) & ~3  # align4(rank + 1)
+    aligned_rank_plus_1 = (rank + 1 + 3) & ~3
     smem_a_pitch = tile_h * aligned_rank_plus_1
     smem_b_pitch = aligned_rank_plus_1 * tile_w
     return (tile_h * tile_w + smem_a_pitch + smem_b_pitch + 16) * 4
@@ -70,7 +70,6 @@ def get_cuda_shared_memory_limit() -> int:
         try:
             _libcuda = ctypes.CDLL("libcuda.so.1")
             _val = ctypes.c_int(0)
-            # CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97
             if _libcuda.cuDeviceGetAttribute(ctypes.byref(_val), ctypes.c_int(97), ctypes.c_int(device_idx)) == 0 and _val.value > 0:
                 return _val.value
         except Exception:
@@ -78,7 +77,6 @@ def get_cuda_shared_memory_limit() -> int:
         try:
             _libcudart = ctypes.CDLL("libcudart.so")
             _val = ctypes.c_int(0)
-            # cudaDevAttrMaxSharedMemoryPerBlockOptin = 78
             if _libcudart.cudaDeviceGetAttribute(ctypes.byref(_val), ctypes.c_int(78), ctypes.c_int(device_idx)) == 0 and _val.value > 0:
                 return _val.value
         except Exception:
@@ -184,7 +182,14 @@ def wait_for_gateway_socket(proc, socket_path, timeout=30, logger=None):
 
 class MiningGraphSession:
     """Allocates all GPU buffers once, captures the CUDA Graph once,
-    then replays it every round — no realloc, no per-kernel sync."""
+    then replays it every round — no realloc, no per-kernel sync.
+
+    Optimizations:
+    - key_A/key_B refreshed in-place with .random_() — no temp tensor allocation
+    - target_tensor pre-allocated as class attribute and updated in-place
+    - Single graph launch + single sync per round
+    - hashes buffer reused across rounds
+    """
 
     def __init__(self, settings: MinerSettings, num_jobs: int = 1, P: int = 1, Q: int = 1):
         self.num_jobs = num_jobs
@@ -198,6 +203,7 @@ class MiningGraphSession:
         self.tile_h = tile_h
         self.tile_w = tile_w
 
+        # ── Noise matrices (allocated once) ──────────────────────────────
         self.EAL         = torch.empty((m, rank), dtype=torch.int8,    device="cuda")
         self.EAL_fp16    = torch.empty((m, rank), dtype=torch.float16, device="cuda")
         self.EBR         = torch.empty((n, rank), dtype=torch.int8,    device="cuda")
@@ -206,9 +212,11 @@ class MiningGraphSession:
         self.EAR_K_major = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
         self.EBL_R_major = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
         self.EBL_K_major = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
+        # Keys as contiguous aligned buffers (refreshed in-place each round)
         self.key_A       = allocate_aligned_byte_tensor(32, align=16, device="cuda")
         self.key_B       = allocate_aligned_byte_tensor(32, align=16, device="cuda")
 
+        # ── Mining I/O buffers (allocated once, reused every round) ──────
         self.A_noised   = torch.zeros((num_jobs, m, k), dtype=torch.int32, device="cuda")
         self.B_noised_t = torch.zeros((num_jobs, n, k), dtype=torch.int32, device="cuda")
         self.a_rows     = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)
@@ -218,6 +226,11 @@ class MiningGraphSession:
         self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
         self.hashes     = torch.empty((num_jobs, self.num_combos, 8), dtype=torch.uint32, device="cuda")
 
+        # ── Pre-allocated target buffer (updated in-place each round) ────
+        # Avoids torch.tensor() allocation on the hot path
+        self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
+
+        # ── CUDA Graph (captured once) ────────────────────────────────────
         self.graph_state = create_mining_graph(num_jobs, self.num_combos, tile_h, tile_w, m, n, k, rank)
         if self.graph_state is None:
             raise RuntimeError(
@@ -225,8 +238,10 @@ class MiningGraphSession:
             )
 
     def run_round(self, mining_job: MiningJob) -> bool:
+        # ── Refresh noise keys in-place (no new tensor allocated) ────────
         self.key_A.random_(0, 256)
         self.key_B.random_(0, 256)
+
         noise_gen(
             R=self.rank, num_threads=64,
             EAL=self.EAL, EAL_fp16=self.EAL_fp16,
@@ -235,6 +250,8 @@ class MiningGraphSession:
             EBR=self.EBR, EBR_fp16=self.EBR_fp16,
             key_A=self.key_A, key_B=self.key_B,
         )
+
+        # ── Single graph launch + single sync ─────────────────────────────
         err = launch_mining_graph(
             self.graph_state,
             self.A_noised, self.B_noised_t,
@@ -245,12 +262,13 @@ class MiningGraphSession:
             raise RuntimeError(f"launch_mining_graph failed: cudaError {err}")
         synchronize_mining_graph(self.graph_state)
 
+        # ── Winner check: uint256 → 8×int64, in-place update of target ───
         _target_int = int(mining_job.target)
-        target_words = [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
-        target_tensor = torch.tensor(target_words, dtype=torch.int64, device="cuda")
+        for i in range(8):
+            self._target_buf[i] = (_target_int >> (32 * i)) & 0xFFFFFFFF
         hashes_i64 = self.hashes.squeeze(0).to(torch.int64)
         winners = torch.nonzero(
-            (hashes_i64 <= target_tensor.unsqueeze(0)).all(dim=-1), as_tuple=False
+            (hashes_i64 <= self._target_buf.unsqueeze(0)).all(dim=-1), as_tuple=False
         )
         return winners.numel() > 0
 
@@ -316,7 +334,8 @@ def main():
         tile_m, tile_n = choose_safe_tile_size(args.tile_m, args.tile_n, args.noise_rank, shared_mem_limit)
         if (tile_m, tile_n) != (args.tile_m, args.tile_n):
             logger.warning(
-                f"Tile ({args.tile_m},{args.tile_n}) exceeds GPU shared memory ({shared_mem_limit // 1024} KB) — using ({tile_m},{tile_n})"
+                f"Tile ({args.tile_m},{args.tile_n}) exceeds GPU shared memory "
+                f"({shared_mem_limit // 1024} KB) — using ({tile_m},{tile_n})"
             )
 
         logger.info(f"GPU: {gpu_name or 'unknown'}  shared_mem_limit={shared_mem_limit // 1024} KB")
