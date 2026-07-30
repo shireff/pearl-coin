@@ -17,11 +17,9 @@ import threading
 import time
 
 import torch
-from miner_base.block_submission import create_proof
 from miner_base.gateway_client import MiningClient
 from miner_base.settings import MinerSettings
-from pearl_gateway.comm.dataclasses import MiningJob, OpenedBlockInfo
-from pearl_gateway.comm.mining_configuration import MMAType, MiningConfiguration, PeriodicPattern
+from pearl_gateway.comm.dataclasses import MiningJob
 from pearl_gateway.config import MinerRpcConfig
 from pearl_gemm import gpu_jackpot_hash, gpu_mine_batch, noise_gen
 
@@ -142,44 +140,52 @@ def run_single_mining_round(
     """Fetch one job from the gateway, mine it on GPU, submit proof."""
     mining_job: MiningJob = client.get_mining_info()
 
-    mining_config = MiningConfiguration(
-        common_dim=settings.noise_range,
-        rank=settings.noise_rank,
-        mma_type=MMAType.Int7xInt7ToInt32,
-        rows_pattern=PeriodicPattern.from_list(settings.rows_pattern),
-        cols_pattern=PeriodicPattern.from_list(settings.cols_pattern),
-    )
-
-    open_block = OpenedBlockInfo(
-        A=None,
-        B_t=None,
-        A_row_indices=[],
-        B_column_indices=[],
-        commitment_hash=None,
-        noise_rank=settings.noise_rank,
-    )
-
     rank = settings.noise_rank
-    kernel_start = time.time()
-    noise_gen(R=rank, num_threads=64)
-
     m = settings.noise_range
     n = settings.noise_range
     k = settings.noise_range
     tile_h = settings.tile_size_m
     tile_w = settings.tile_size_n
 
-    A_noised = torch.empty((m, k), dtype=torch.int32, device="cuda")
-    B_noised_t = torch.empty((n, k), dtype=torch.int32, device="cuda")
-    a_rows = torch.empty((1, tile_h), dtype=torch.int32, device="cuda")
-    b_cols = torch.empty((1, tile_w), dtype=torch.int32, device="cuda")
+    # ── Allocate noise matrices ──────────────────────────────────────────────
+    EAL          = torch.empty((m, rank), dtype=torch.int8,    device="cuda")
+    EAL_fp16     = torch.empty((m, rank), dtype=torch.float16, device="cuda")
+    EBR          = torch.empty((n, rank), dtype=torch.int8,    device="cuda")
+    EBR_fp16     = torch.empty((n, rank), dtype=torch.float16, device="cuda")
+    EAR_R_major  = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
+    EAR_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
+    EBL_R_major  = torch.empty((k, rank), dtype=torch.int8,    device="cuda")
+    EBL_K_major  = torch.empty((rank, k), dtype=torch.int8,    device="cuda")
+
+    # ── Generate noise on GPU ────────────────────────────────────────────────
+    kernel_start = time.time()
+    noise_gen(
+        R=rank,
+        num_threads=64,
+        EAL=EAL,
+        EAL_fp16=EAL_fp16,
+        EAR_R_major=EAR_R_major,
+        EAR_K_major=EAR_K_major,
+        EBL_R_major=EBL_R_major,
+        EBL_K_major=EBL_K_major,
+        EBR=EBR,
+        EBR_fp16=EBR_fp16,
+    )
+
+    # ── Allocate noised A / B matrices ───────────────────────────────────────
+    A_noised   = torch.zeros((m, k), dtype=torch.int32, device="cuda")
+    B_noised_t = torch.zeros((n, k), dtype=torch.int32, device="cuda")
+
+    # ── Mine: row/col indices for the tile ───────────────────────────────────
+    a_rows = torch.arange(tile_h, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_h)
+    b_cols = torch.arange(tile_w, dtype=torch.int32, device="cuda").unsqueeze(0)  # (1, tile_w)
 
     jackpots = gpu_mine_batch(
         a_noised=A_noised,
         b_noised_t=B_noised_t,
         a_rows_data=a_rows,
         b_cols_data=b_cols,
-        jobs=torch.empty((1,), dtype=torch.int32, device="cuda"),
+        jobs=torch.zeros((1,), dtype=torch.int32, device="cuda"),
         num_jobs=1,
         P=1,
         Q=1,
@@ -192,22 +198,20 @@ def run_single_mining_round(
     )
     gpu_mine_batch_time = time.time() - kernel_start
 
-    keys = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
-    num_combos = 1
-    hashes = torch.empty(
-        (1, num_combos, 8), dtype=torch.uint32, device="cuda"
-    )
-
+    # ── Hash jackpots ────────────────────────────────────────────────────────
+    keys   = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")
+    hashes = torch.empty((1, 1, 8), dtype=torch.uint32, device="cuda")
     gpu_jackpot_hash(
         jackpots=jackpots,
         keys=keys,
         hashes=hashes,
         num_candidates=1,
-        num_combos=num_combos,
+        num_combos=1,
     )
 
     elapsed = time.time() - kernel_start
-    tmok = (tile_h * tile_w) / rank / 1000.0
+    tmok    = (tile_h * tile_w) / rank / 1000.0
+
     logger = None
     try:
         from miner_utils import get_logger
@@ -215,11 +219,13 @@ def run_single_mining_round(
     except Exception:
         pass
 
+    msg = f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok / elapsed if elapsed > 0 else 0.0:.2f}"
     if logger is not None:
         logger.info("GPU round time: %.3fs, tmok/s=%.2f", elapsed, tmok / elapsed if elapsed > 0 else 0.0)
     else:
-        print(f"[stats] GPU round time: {elapsed:.3f}s, tmok/s={tmok / elapsed if elapsed > 0 else 0.0:.2f}")
+        print(msg)
 
+    # ── Check for winner ─────────────────────────────────────────────────────
     target_tensor = torch.tensor(
         [mining_job.target], dtype=torch.uint32, device="cuda"
     )
@@ -230,6 +236,17 @@ def run_single_mining_round(
     if winners.numel() == 0:
         return False
 
+    # ── Build open_block with actual matrix data for proof ───────────────────
+    from pearl_gateway.comm.dataclasses import OpenedBlockInfo
+    open_block = OpenedBlockInfo(
+        A=A_noised.cpu().numpy(),
+        B_t=B_noised_t.cpu().numpy(),
+        A_row_indices=a_rows.squeeze(0).cpu().tolist(),
+        B_column_indices=b_cols.squeeze(0).cpu().tolist(),
+        commitment_hash=None,
+        noise_rank=rank,
+    )
+    from miner_base.block_submission import create_proof
     plain_proof = create_proof(open_block, mining_job.incomplete_header_bytes)
     client.submit_plain_proof(plain_proof, mining_job)
     return True
