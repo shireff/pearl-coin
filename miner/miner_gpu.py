@@ -305,11 +305,15 @@ def run_single_mining_round(
         print(msg)
 
     # ── Check for winner ─────────────────────────────────────────────────────
-    target_tensor = torch.tensor(
-        [mining_job.target], dtype=torch.uint32, device="cuda"
-    )
+    # mining_job.target is a uint256 integer — unpack into 8 × uint32 (little-endian words)
+    _target_int = int(mining_job.target)
+    _target_words = [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
+    target_tensor = torch.tensor(_target_words, dtype=torch.uint32, device="cuda")  # (8,)
+    # hashes shape: (num_jobs, num_combos, 8) — compare each hash against the target word-by-word
+    # A hash wins if every word is <= the corresponding target word
     winners = torch.nonzero(
-        hashes.squeeze(0) <= target_tensor.unsqueeze(0), as_tuple=False
+        (hashes.squeeze(0) <= target_tensor.unsqueeze(0)).all(dim=-1),
+        as_tuple=False,
     )
 
     if winners.numel() == 0:
@@ -421,6 +425,18 @@ def main():
                 run_single_mining_round(client, settings)
             except KeyboardInterrupt:
                 raise
+            except BrokenPipeError as exc:
+                logger.warning("Gateway connection lost (BrokenPipeError) — reconnecting in 3s...")
+                time.sleep(3)
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                try:
+                    client = MiningClient(rpc_config)
+                    logger.info("Reconnected to gateway")
+                except Exception as reconnect_exc:
+                    logger.error(f"Reconnect failed: {reconnect_exc}")
             except Exception as exc:
                 import traceback as _tb
                 tb = _tb.extract_tb(exc.__traceback__)
