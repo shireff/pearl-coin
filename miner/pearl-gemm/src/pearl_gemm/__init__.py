@@ -109,6 +109,7 @@ from .helpers import (  # noqa: E402
     make_pow_target_tensor,
 )
 from .pearl_gemm_interface import (  # noqa: E402
+    BLAKE3_DIGEST_SIZE_U32,
     commitment_hash_from_merkle_roots,
     create_mining_graph,
     create_persistent_pipeline,
