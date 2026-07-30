@@ -25,11 +25,8 @@ done
 
 if [ -z "${CUDA_HOME:-}" ]; then
     TORCH_CUDA="$(python -c 'import torch; print(getattr(torch.version, "cuda", ""))' 2>/dev/null || true)"
-    candidates=""
-    if [ -n "${TORCH_CUDA:-}" ]; then
-        candidates="/usr/local/cuda-${TORCH_CUDA} /usr/local/cuda-${TORCH_CUDA%.*}"
-    fi
-    candidates="$candidates /usr/local/cuda /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-*"
+    REQUIRED_CUDA="${TORCH_CUDA:-13.0}"
+    candidates="/usr/local/cuda-${REQUIRED_CUDA} /usr/local/cuda-${REQUIRED_CUDA%.*} /usr/local/cuda /usr/local/cuda-12.4 /usr/local/cuda-12.6 /usr/local/cuda-13 /usr/local/cuda-13.0 /usr/local/cuda-13.1 /usr/local/cuda-13.2 /usr/local/cuda-14.0 /usr/local/cuda-*"
     for candidate in $candidates; do
         if [ -x "$candidate/bin/nvcc" ]; then
             CUDA_HOME="$candidate"
@@ -40,8 +37,8 @@ fi
 
 if [ -z "${CUDA_HOME:-}" ]; then
     echo "ERROR: CUDA_HOME is not set and no supported CUDA toolkit was found."
-    echo "Install CUDA 13.x and export CUDA_HOME to your actual CUDA install path."
-    echo "For example: export CUDA_HOME=/usr/local/cuda-13.2"
+    echo "Set CUDA_HOME to the CUDA toolkit that matches your PyTorch build."
+    echo "For example: export CUDA_HOME=/usr/local/cuda-12.4" 
     exit 1
 fi
 
@@ -51,8 +48,9 @@ if [ -z "${CUDA_VERSION:-}" ]; then
     exit 1
 fi
 
-if printf '%s\n' "$CUDA_VERSION" "13.0" | sort -V | head -n1 | grep -qv "13.0"; then
-    echo "ERROR: CUDA 13.0+ is required for pearl-gemm, but found CUDA $CUDA_VERSION"
+if [ "${CUDA_VERSION}" != "${REQUIRED_CUDA}" ]; then
+    echo "ERROR: PyTorch was compiled with CUDA ${REQUIRED_CUDA}, but nvcc from CUDA_HOME reports ${CUDA_VERSION}."
+    echo "Set CUDA_HOME to a matching toolkit, or install a PyTorch build for CUDA ${CUDA_VERSION}."
     exit 1
 fi
 
