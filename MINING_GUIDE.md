@@ -60,6 +60,147 @@ The CPU only:
 
 ---
 
+## Installation Scenarios
+
+### 1. First-time install on a new machine
+
+#### Linux / macOS
+
+1. Clone the repo and initialize submodules:
+```bash
+git clone https://github.com/shireff/pearl-cion.git
+cd pearl
+git submodule update --init --recursive
+```
+
+2. Install CUDA Toolkit 13.0:
+```bash
+# Install the CUDA 13.0 toolkit for your distro
+nvcc --version
+# expected output includes "release 13.0"
+```
+If CUDA is installed in a nonstandard path, set:
+```bash
+export CUDA_HOME=/usr/local/cuda-13.0
+```
+
+3. Install the required tools:
+```bash
+# uv package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Go toolchain
+# use your package manager or download from https://go.dev/dl/
+```
+
+4. Build the Python workspace and CUDA extension:
+```bash
+uv sync --package vllm-miner
+```
+
+5. Build the blockchain binaries if you need the full node locally:
+```bash
+task build:blockchain
+```
+If `task` is not installed, build manually:
+```bash
+cd zk-pow
+cargo run --release --no-default-features --bin build_cache src/circuit/v2_cache.bin src/v1/v1_cache.bin
+cd ..
+go build -tags xmss,zkpow -o bin/pearld ./node
+go build -tags xmss,zkpow -o bin/prlctl ./node/cmd/prlctl
+go build -tags xmss,zkpow -o bin/oyster ./wallet
+CGO_ENABLED=0 go build -o bin/oystercli ./wallet/cmd/oystercli
+```
+
+6. If the `pearl-gemm` build fails, retry directly from `miner/pearl-gemm`:
+```bash
+cd miner/pearl-gemm
+bash build.sh --no-pull
+```
+
+#### Windows
+
+1. Clone the repo and initialize submodules:
+```powershell
+git clone https://github.com/shireff/pearl-cion.git
+cd pearl-cion
+git submodule update --init --recursive
+```
+
+2. Install CUDA Toolkit 13.0 and add it to PATH.
+3. Install `uv`, Rust, and Go, or use Windows installers from their official sites.
+
+4. Verify Python 3.12 is available and that your environment can run `python`.
+
+5. Build the Python workspace:
+```powershell
+uv sync --package vllm-miner
+```
+
+6. If CUDA kernel build fails, run from PowerShell:
+```powershell
+cd miner/pearl-gemm
+bash build.sh --no-pull
+```
+
+> Note: Windows support may require WSL or a Linux-like shell for the CUDA build step.
+
+### 2. Existing checkout on a machine that already has the repo
+
+From the repo root:
+```bash
+git pull origin main
+git submodule update --init --recursive
+```
+
+Then refresh the Python workspace:
+```bash
+uv sync --package vllm-miner
+```
+
+If you changed CUDA kernel or model plugin code, rebuild the extension:
+```bash
+cd miner/pearl-gemm
+bash build.sh --no-pull
+```
+
+### 3. If the repo is already built and you only want to run it
+
+From the repo root, start the full node:
+```bash
+bin/pearld --rpcuser=rpcuser --rpcpass=rpcpass --rpclisten=0.0.0.0:44107 --miningaddr=<your-mining-address> --txindex
+```
+
+Start the gateway in another terminal:
+```bash
+pearl-gateway start
+```
+
+Start the miner in another terminal:
+```bash
+uv run vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.9 \
+  --enforce-eager
+```
+
+### 4. Important repo paths
+
+- `pearl/` — repository root
+- `miner/pearl-gemm/` — CUDA kernel source and extension build logic
+- `miner/vllm-miner/` — vLLM plugin and model-serving package
+- `bin/pearld`, `bin/prlctl`, `bin/oyster`, `bin/oystercli` — compiled node and wallet binaries
+- `miner/pearl-gemm/src/pearl_gemm/pearl_gemm_cuda.so` — built CUDA extension output
+
+---
+
 ## Quick Reference — Client-Facing Commands
 
 ### Build (from repository root)
@@ -131,7 +272,7 @@ prlctl getinfo
 ### Step 1 — Clone the repository
 
 ```bash
-git clone https://github.com/pearl-research-labs/pearl.git
+git clone https://github.com/shireff/pearl-cion.git
 cd pearl
 git submodule update --init --recursive
 ```
@@ -370,7 +511,7 @@ vllm serve pearl-ai/Llama-3.3-70B-Instruct-pearl \
 ### Step 1 — Clone the repository
 
 ```bash
-git clone https://github.com/pearl-research-labs/pearl.git
+git clone https://github.com/shireff/pearl-cion.git
 cd pearl
 git submodule update --init --recursive
 ```
@@ -788,7 +929,7 @@ pearl/
 ## Useful Links
 
 - [Pearl Protocol Paper](https://arxiv.org/abs/2504.09971)
-- [GitHub Repository](https://github.com/pearl-research-labs/pearl)
+- [GitHub Repository](https://github.com/shireff/pearl-cion)
 - [HuggingFace Model](https://huggingface.co/pearl-ai/Llama-3.3-70B-Instruct-pearl)
 - [CUDA 13.0 Download](https://developer.nvidia.com/cuda-13-0-download-archive)
 - [uv Documentation](https://docs.astral.sh/uv/)
