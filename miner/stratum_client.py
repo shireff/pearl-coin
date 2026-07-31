@@ -220,12 +220,15 @@ class StratumClient:
 
     def _handle_mining_notify(self, params: list) -> None:
         try:
+            self._logger.debug(f"mining.notify params: {params}")
             job_id = str(params[0]) if len(params) > 0 else ""
             blob_hex = str(params[1]) if len(params) > 1 else ""
             target_hex = str(params[2]) if len(params) > 2 else ""
 
+            self._logger.debug(f"job_id={job_id} blob_len={len(blob_hex)} target_len={len(target_hex)}")
+
             if not blob_hex or not target_hex:
-                self._logger.warning("Empty blob or target from pool")
+                self._logger.warning(f"Empty blob or target from pool: blob_hex='{blob_hex}' target_hex='{target_hex}'")
                 return
 
             blob = bytes.fromhex(blob_hex)
