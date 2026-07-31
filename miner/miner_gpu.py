@@ -515,9 +515,9 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Nonce as 24-byte hex: real pool prefix (bytes [278:294]) + 8-byte nonce uint64.
-        # Using zero padding here causes the pool to compute a different hash → rejected.
-        nonce_hex = (self._last_blob_prefix + self._last_nonce.to_bytes(8, "big")).hex()
+        # Per official Alephium Stratum spec: nonceSansExtraNonce = 8 bytes only.
+        # The pool prepends its own 16-byte extra-nonce when verifying — do NOT send it.
+        nonce_hex = self._last_nonce.to_bytes(8, "big").hex()
         return True, nonce_hex, ""
 
     def close(self) -> None:
