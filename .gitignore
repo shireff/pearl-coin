@@ -175,8 +175,6 @@ attn_test.py
 *.pth
 *.ipynb
 notebooks/
-bin/
-!apps/**/bin
 simnet_data
 
 # Cursor
