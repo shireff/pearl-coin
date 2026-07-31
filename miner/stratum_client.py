@@ -185,7 +185,7 @@ class StratumClient:
                     line = line.strip()
                     if not line:
                         continue
-                    self._logger.debug(f"RAW from pool: {line[:200]}")
+                    self._logger.info(f"RAW from pool: {line[:200]}")
                     self._handle_message(line)
             except Exception as e:
                 if not self._stop_event.is_set():
@@ -204,7 +204,7 @@ class StratumClient:
             return
 
         if "method" in message:
-            self._logger.debug(f"Notification from pool: {message.get('method')} params={message.get('params')}")
+            self._logger.info(f"Notification from pool: {message.get('method')} params={message.get('params')}")
             self._handle_notification(message)
         elif "id" in message:
             self._handle_response(message)
