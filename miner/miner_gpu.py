@@ -461,6 +461,12 @@ class AlephiumMiningSession:
         self._last_nonce: int = -1
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
+        # Reset nonce counter when job changes (new block template)
+        job_id = getattr(job, "job_id", "")
+        if not hasattr(self, "_last_job_id") or self._last_job_id != job_id:
+            self._base_nonce = 0
+            self._last_job_id = job_id
+
         # Copy 302 bytes into first 302 slots, last 18 remain zero (padding)
         blob_tensor = torch.frombuffer(bytes(job.blob), dtype=torch.uint8)
         self._blob_gpu[:302].copy_(blob_tensor)
@@ -493,10 +499,10 @@ class AlephiumMiningSession:
         pass
 
 
-def detect_pool_algorithm(pool_url: str, blob: bytes) -> str:
-    """Detect mining algorithm from pool URL and blob size."""
+def detect_pool_algorithm(pool_url: str) -> str:
+    """Detect mining algorithm from pool URL."""
     url_lower = pool_url.lower()
-    if "alph" in url_lower or len(blob) == 302:
+    if "alph" in url_lower:
         return "alephium"
     return "pearl"
 
@@ -529,17 +535,10 @@ def main():
                 return 1
             logger.info("Connected to pool successfully")
 
-            first_job = None
-            try:
-                first_job = client.get_mining_info()
-            except RuntimeError:
-                pass
-            if first_job and first_job.blob:
-                pool_algorithm = detect_pool_algorithm(args.pool_url, first_job.blob)
-                logger.info(f"Detected pool algorithm: {pool_algorithm}")
-                client.algorithm = pool_algorithm
-                if client._stratum:
-                    client._stratum.algorithm = pool_algorithm
+            # Detect algorithm from URL — no racy first-job fetch needed
+            pool_algorithm = detect_pool_algorithm(args.pool_url)
+            logger.info(f"Detected pool algorithm: {pool_algorithm}")
+            client.algorithm = pool_algorithm
         else:
             if args.rpc_url is not None:
                 managed_gateway = True

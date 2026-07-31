@@ -182,10 +182,11 @@ __device__ __forceinline__ void blake3_compress_msg_block_u32(
   state[5]  = chaining_value[5];
   state[6]  = chaining_value[6];
   state[7]  = chaining_value[7];
-  state[8]  = 0;
-  state[9]  = 0;
-  state[10] = 0;
-  state[11] = 0;
+  // Blake3 spec §2.3: state[8..11] = IV[0..3], not 0
+  state[8]  = 0x6A09E667u;
+  state[9]  = 0xBB67AE85u;
+  state[10] = 0x3C6EF372u;
+  state[11] = 0xA54FF53Au;
   state[12] = static_cast<uint32_t>(counter);
   state[13] = static_cast<uint32_t>(counter >> 32);
   state[14] = block_len;
@@ -220,7 +221,8 @@ __device__ __forceinline__ void blake3_keyed_hash_inline(
     uint32_t* output) {
   uint32_t cv[8];
   for (int i = 0; i < 8; i++) cv[i] = key[i];
-  blake3_compress_msg_block_u32(msg, cv, 0, 64, 0x01000000 | 0x02000000 | 0x04000000);
+  // CHUNK_START | CHUNK_END | ROOT | KEYED_HASH = 1 | 2 | 8 | 16 = 0x1B
+  blake3_compress_msg_block_u32(msg, cv, 0, 64, 0x1u | 0x2u | 0x8u | 0x10u);
   for (int i = 0; i < 8; i++) output[i] = cv[i];
 }
 
@@ -235,8 +237,8 @@ __device__ __forceinline__ void blake3_standard_hash_inline(
     0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u
   };
   // CHUNK_START | CHUNK_END | ROOT flags = single-chunk, single-block hash
-  blake3_compress_msg_block_u32(msg, cv, 0, 64,
-      0x01000000u | 0x02000000u | 0x04000000u);
+  // CHUNK_START | CHUNK_END | ROOT = 1 | 2 | 8 = 0xB
+  blake3_compress_msg_block_u32(msg, cv, 0, 64, 0x1u | 0x2u | 0x8u);
   for (int i = 0; i < 8; i++) output[i] = cv[i];
 }
 

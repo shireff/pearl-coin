@@ -53,7 +53,7 @@ void alph_mine_kernel(
     for (int i = threadIdx.x; i < PADDED_WORDS; i += blockDim.x)
         s_blob[i] = d_blob_words[i];
     for (int i = threadIdx.x; i < 8; i += blockDim.x)
-        s_target[i] = d_target[i];
+        s_target[i] = __byte_perm(d_target[i], 0, 0x0123);  // big-endian uint8 → correct uint32
     __syncthreads();
 
     // ── 2. Check if any winner already found (early exit) ─────────────────
@@ -120,19 +120,21 @@ void alph_mine_kernel(
             msg[w] = r[block * 16 + w];
 
         uint32_t block_len;
-        uint32_t flags = 0x01000000u;  // CHUNK_START
+        // Blake3 flag constants (from blake3_constants.hpp):
+        // CHUNK_START = 1, CHUNK_END = 2, ROOT = 8
+        uint32_t flags = 0x1u;  // CHUNK_START for block 0
         if (block == 0 && PADDED_BLOCKS == 1) {
             block_len = BLOB_LEN;
-            flags |= 0x02000000u | 0x04000000u;  // CHUNK_END | ROOT
+            flags = 0x1u | 0x2u | 0x8u;  // CHUNK_START | CHUNK_END | ROOT
         } else if (block == 0) {
             block_len = 64;
-            // CHUNK_START only for first block
+            flags = 0x1u;  // CHUNK_START only
         } else if (block == PADDED_BLOCKS - 1) {
             block_len = BLOB_LEN - (PADDED_BLOCKS - 1) * 64;  // 302 - 4*64 = 46
-            flags = 0x02000000u | 0x04000000u;  // CHUNK_END | ROOT (no CHUNK_START for middle/last)
+            flags = 0x2u | 0x8u;  // CHUNK_END | ROOT (no CHUNK_START)
         } else {
             block_len = 64;
-            flags = 0u;  // middle block: no special flags
+            flags = 0x0u;  // middle blocks: no flags
         }
 
         // counter = 0: 302 bytes fits in a single Blake3 chunk (< 1024 bytes)
@@ -149,9 +151,10 @@ void alph_mine_kernel(
         bool decided = false;
         #pragma unroll
         for (int i = 0; i < 8 && !decided; i++) {
+            // Both s_target[i] and hash_be are in big-endian word order
             uint32_t hash_be = __byte_perm(cv[i], 0, 0x0123);
             if (hash_be < s_target[i]) { winner = true;  decided = true; }
-            if (hash_be > s_target[i]) { winner = false; decided = true; }
+            else if (hash_be > s_target[i]) { winner = false; decided = true; }
         }
         if (!decided) winner = true;  // exactly equal → valid share
     }
@@ -186,8 +189,6 @@ void launch_alph_mine_kernel(
     constexpr int THREADS = 256;
     int blocks = (num_nonces + THREADS - 1) / THREADS;
 
-    printf("[pearl_gemm] alph_mine_kernel: base_nonce=%llu num_nonces=%u blocks=%d\n",
-           (unsigned long long)base_nonce, num_nonces, blocks);
 
     alph_mine_kernel<<<blocks, THREADS, 0, stream>>>(
         d_blob_words, base_nonce, num_nonces,
