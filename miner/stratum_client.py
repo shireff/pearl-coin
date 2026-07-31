@@ -201,6 +201,7 @@ class StratumClient:
             return
 
         if "method" in message:
+            self._logger.debug(f"Notification from pool: {message.get('method')} params={message.get('params')}")
             self._handle_notification(message)
         elif "id" in message:
             self._handle_response(message)
