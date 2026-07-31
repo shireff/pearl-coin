@@ -461,11 +461,16 @@ class AlephiumMiningSession:
         self._last_nonce: int = -1
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
-        # Reset nonce counter when job changes (new block template)
+        # Reset nonce counter only when the block height changes (real new block).
+        # Alephium pools send a new job_id every ~1s even for the same height,
+        # so resetting on job_id would keep scanning nonce=0 forever.
+        job_height = getattr(job, "height", None)
         job_id = getattr(job, "job_id", "")
-        if not hasattr(self, "_last_job_id") or self._last_job_id != job_id:
+        height_changed = not hasattr(self, "_last_height") or self._last_height != job_height
+        if height_changed:
             self._base_nonce = 0
-            self._last_job_id = job_id
+            self._last_height = job_height
+        self._last_job_id = job_id
 
         # Copy 302 bytes into first 302 slots, last 18 remain zero (padding)
         blob_tensor = torch.frombuffer(bytes(job.blob), dtype=torch.uint8)
@@ -667,9 +672,18 @@ def main():
 
         while True:
             try:
-                # Non-blocking: get new job if available, otherwise reuse last job
+                # Non-blocking: drain queue and take the latest job only.
+                # For Alephium the pool sends a new job_id every ~1s even when
+                # the block height has not changed — draining prevents stale-job
+                # accumulation and avoids resetting base_nonce on every round.
                 try:
-                    _current_job = _job_queue.get_nowait()
+                    latest = _job_queue.get_nowait()
+                    while True:
+                        try:
+                            latest = _job_queue.get_nowait()
+                        except _queue.Empty:
+                            break
+                    _current_job = latest
                 except _queue.Empty:
                     if _current_job is None:
                         # No job yet — block until first job arrives
