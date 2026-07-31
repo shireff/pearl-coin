@@ -183,6 +183,7 @@ class StratumClient:
                     line = line.strip()
                     if not line:
                         continue
+                    self._logger.debug(f"RAW from pool: {line[:200]}")
                     self._handle_message(line)
             except Exception as e:
                 if not self._stop_event.is_set():
