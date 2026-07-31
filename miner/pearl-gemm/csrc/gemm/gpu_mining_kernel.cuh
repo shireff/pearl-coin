@@ -224,6 +224,22 @@ __device__ __forceinline__ void blake3_keyed_hash_inline(
   for (int i = 0; i < 8; i++) output[i] = cv[i];
 }
 
+// Standard (non-keyed) BLAKE3 hash — uses BLAKE3 IV as chaining value.
+// Used for Alephium PoW: Blake3(blob_with_nonce) with no custom key.
+// BLAKE3 IV = first 8 words of SHA-256 IV (fractional parts of square roots).
+__device__ __forceinline__ void blake3_standard_hash_inline(
+    const uint32_t* msg,   // 16 x uint32 = 64 bytes input block
+    uint32_t* output) {    // 8 x uint32 = 32 bytes output hash
+  uint32_t cv[8] = {
+    0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au,
+    0x510E527Fu, 0x9B05688Cu, 0x1F83D9ABu, 0x5BE0CD19u
+  };
+  // CHUNK_START | CHUNK_END | ROOT flags = single-chunk, single-block hash
+  blake3_compress_msg_block_u32(msg, cv, 0, 64,
+      0x01000000u | 0x02000000u | 0x04000000u);
+  for (int i = 0; i < 8; i++) output[i] = cv[i];
+}
+
 __global__ void gpu_mining_kernel(
     const int32_t* __restrict__ d_a_noised,
     const int32_t* __restrict__ d_b_noised_t,

@@ -1043,3 +1043,23 @@ def pipeline_enqueue_jobs(pipeline, num_jobs: int):
 def pipeline_wait_for_completion(pipeline):
     """Wait for all jobs in the persistent pipeline to complete."""
     pearl_gemm_cuda.pipeline_wait_for_completion(pipeline)
+
+
+def alph_mine_batch(
+    blob,          # torch.Tensor uint8[302], device=cuda
+    base_nonce,    # int, starting nonce
+    num_nonces,    # int, nonces per call (default 1<<20)
+    target,        # torch.Tensor uint8[32], device=cuda
+):
+    """Alephium Blake3 GPU mining — returns (found, nonce).
+
+    Args:
+        blob: (302,) uint8 tensor on CUDA — headerBlob from pool
+        base_nonce: starting nonce for this batch
+        num_nonces: number of nonces to try per launch
+        target: (32,) uint8 tensor on CUDA — big-endian target
+
+    Returns:
+        (found: bool, nonce: int)
+    """
+    return pearl_gemm_cuda.alph_mine_batch(blob, base_nonce, num_nonces, target)

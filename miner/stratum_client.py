@@ -29,6 +29,7 @@ class StratumClient:
         username: str,
         password: str = "x",
         worker_name: str = "",
+        algorithm: str = "pearl",
         on_job: Optional[Callable[[StratumJob], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
     ):
@@ -36,6 +37,7 @@ class StratumClient:
         self.username = username
         self.password = password
         self.worker_name = worker_name
+        self.algorithm = algorithm
         self.on_job = on_job
         self.on_error = on_error
         self._sock: Optional[socket.socket] = None
@@ -97,12 +99,16 @@ class StratumClient:
         with self._lock:
             return self._current_job
 
-    def submit_share(self, job_id: str, nonce: str, result: str) -> bool:
+    def submit_share(self, job_id: str, nonce: str, result: str = "") -> bool:
         if not self.is_connected():
             return False
 
         worker = self.worker_name if self.worker_name else self.username.split(".")[0]
-        params = [job_id, nonce, result, worker]
+
+        if self.algorithm == "alephium":
+            params = [job_id, nonce, worker]
+        else:
+            params = [job_id, nonce, result, worker]
 
         response = self._send_request("mining.submit", params)
         if response is None:

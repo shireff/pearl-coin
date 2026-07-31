@@ -110,6 +110,7 @@ from .helpers import (  # noqa: E402
 )
 from .pearl_gemm_interface import (  # noqa: E402
     BLAKE3_DIGEST_SIZE_U32,
+    alph_mine_batch,
     commitment_hash_from_merkle_roots,
     create_mining_graph,
     create_persistent_pipeline,
@@ -138,6 +139,7 @@ __all__ = [
     "HostSignalHeaderPinnedPool",
     "HostSignalStatus",
     "ProofTileIndices",
+    "alph_mine_batch",
     "commitment_hash_from_merkle_roots",
     "create_mining_graph",
     "create_persistent_pipeline",

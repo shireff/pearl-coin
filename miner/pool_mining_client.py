@@ -36,12 +36,14 @@ class PoolMiningClient:
         password: str = "x",
         worker_name: str = "",
         device_name: str = "",
+        algorithm: str = "pearl",
     ):
         self.pool_url = pool_url
         self.username = username
         self.password = password
         self.worker_name = worker_name
         self.device_name = device_name
+        self.algorithm = algorithm
         self._stratum: Optional[StratumClient] = None
         self._current_job: Optional[PoolMiningJob] = None
         self._job_lock = threading.Lock()
@@ -56,6 +58,7 @@ class PoolMiningClient:
             username=worker,
             password=self.password,
             worker_name=self.worker_name or self.username.split(".")[0],
+            algorithm=self.algorithm,
             on_job=self._on_pool_job,
             on_error=self._on_pool_error,
         )
@@ -100,9 +103,12 @@ class PoolMiningClient:
             self._logger.error("Cannot submit: no job ID")
             return False
 
-        success = self._stratum.submit_share(target_job_id, nonce, result_hex)
+        if self.algorithm == "alephium":
+            success = self._stratum.submit_share(target_job_id, nonce)
+        else:
+            success = self._stratum.submit_share(target_job_id, nonce, result_hex)
         if success:
-            self._logger.info(f"Share accepted: nonce={nonce[:16]}... result={result_hex[:16]}...")
+            self._logger.info(f"Share accepted: nonce={nonce[:16]}...")
         else:
             self._logger.warning(f"Share rejected: nonce={nonce[:16]}...")
 

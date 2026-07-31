@@ -29,6 +29,7 @@ from pearl_gemm import (
     noise_gen,
     gpu_mine_batch,
     gpu_jackpot_hash,
+    alph_mine_batch,
 )
 
 from pool_mining_client import PoolMiningClient, PoolMiningJob
@@ -436,6 +437,70 @@ class MiningGraphSession:
             self._noise_graph = None
 
 
+class AlephiumMiningSession:
+    """GPU mining session for Alephium (Blake3 standard, non-keyed).
+
+    Optimizations:
+    - Blob pre-allocated as 320 bytes (zero-padded) — avoids per-round allocation
+    - Target pre-allocated and updated in-place
+    - nonces_per_round = 2^20 covers 1M nonces per kernel launch (~1ms on RTX 4060)
+    - Nonce counter increments across rounds — no duplicate nonce retries
+    """
+
+    BLOB_PADDED_LEN = 320  # 302 bytes + 18 zero bytes padding to 5×64
+
+    def __init__(self, nonces_per_round: int = 1 << 20):
+        self.nonces_per_round = nonces_per_round
+        self._base_nonce: int = 0
+        # Pre-allocate zero-padded blob (320 bytes) — last 18 bytes stay zero
+        self._blob_gpu = torch.zeros(self.BLOB_PADDED_LEN, dtype=torch.uint8, device="cuda")
+        self._target_gpu = torch.empty(32, dtype=torch.uint8, device="cuda")
+        self._t_start = torch.cuda.Event(enable_timing=True)
+        self._t_end = torch.cuda.Event(enable_timing=True)
+        self._last_found: bool = False
+        self._last_nonce: int = -1
+
+    def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
+        # Copy 302 bytes into first 302 slots, last 18 remain zero (padding)
+        blob_tensor = torch.frombuffer(bytes(job.blob), dtype=torch.uint8)
+        self._blob_gpu[:302].copy_(blob_tensor)
+
+        # Target as big-endian uint8[32]
+        target_bytes = job.target.to_bytes(32, "big")
+        self._target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
+
+        self._t_start.record()
+        found, nonce = alph_mine_batch(
+            self._blob_gpu,
+            self._base_nonce,
+            self.nonces_per_round,
+            self._target_gpu,
+        )
+        self._t_end.record()
+        self._base_nonce += self.nonces_per_round
+        self._last_found = bool(found)
+        self._last_nonce = int(nonce)
+        return self._last_found, self._last_nonce
+
+    def get_last_result(self) -> tuple[bool, str, str]:
+        if not self._last_found or self._last_nonce < 0:
+            return False, "", ""
+        # Nonce as 24-byte big-endian hex (16 zero bytes + 8-byte uint64)
+        nonce_hex = self._last_nonce.to_bytes(8, "big").rjust(24, b"\x00").hex()
+        return True, nonce_hex, ""
+
+    def close(self) -> None:
+        pass
+
+
+def detect_pool_algorithm(pool_url: str, blob: bytes) -> str:
+    """Detect mining algorithm from pool URL and blob size."""
+    url_lower = pool_url.lower()
+    if "alph" in url_lower or len(blob) == 302:
+        return "alephium"
+    return "pearl"
+
+
 def main():
     from miner_utils import get_logger
 
@@ -449,6 +514,8 @@ def main():
     session = None
 
     try:
+        pool_algorithm = "pearl"
+
         if pool_mode:
             logger.info(f"Starting in POOL mode: {args.pool_url}")
             client = PoolMiningClient(
@@ -461,6 +528,18 @@ def main():
                 logger.error("Failed to connect to pool")
                 return 1
             logger.info("Connected to pool successfully")
+
+            first_job = None
+            try:
+                first_job = client.get_mining_info()
+            except RuntimeError:
+                pass
+            if first_job and first_job.blob:
+                pool_algorithm = detect_pool_algorithm(args.pool_url, first_job.blob)
+                logger.info(f"Detected pool algorithm: {pool_algorithm}")
+                client.algorithm = pool_algorithm
+                if client._stratum:
+                    client._stratum.algorithm = pool_algorithm
         else:
             if args.rpc_url is not None:
                 managed_gateway = True
@@ -522,9 +601,13 @@ def main():
         Q = args.Q
         num_jobs = args.num_jobs
         logger.info(f"Initialising mining session num_jobs={num_jobs} P={P} Q={Q} num_combos={P*Q}...")
-        session = MiningGraphSession(settings, num_jobs=num_jobs, P=P, Q=Q)
-        smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
-        logger.info(f"Session ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB  num_jobs={num_jobs}  P={session.P}  Q={session.Q}  combos={session.P*session.Q}")
+        if pool_mode and pool_algorithm == "alephium":
+            session = AlephiumMiningSession()
+            logger.info(f"Alephium session ready — nonces_per_round={session.nonces_per_round}")
+        else:
+            session = MiningGraphSession(settings, num_jobs=num_jobs, P=P, Q=Q)
+            smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
+            logger.info(f"Session ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB  num_jobs={num_jobs}  P={session.P}  Q={session.Q}  combos={session.P*session.Q}")
 
         import queue as _queue
         _job_queue: _queue.Queue = _queue.Queue(maxsize=2)
@@ -581,10 +664,13 @@ def main():
 
                 session._t_end.synchronize()
                 elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0
-                tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
-                tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
-
-                logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
+                if isinstance(session, AlephiumMiningSession):
+                    tmok_per_s = 0.0
+                    logger.info(f"GPU round time: {elapsed*1000:.1f}ms  nonces={session.nonces_per_round}")
+                else:
+                    tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
+                    tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
+                    logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
 
                 # In pool mode, immediately run the next round without waiting
                 # for a new job — keeps GPU at P0 and maximizes tmok/s.
@@ -593,7 +679,7 @@ def main():
                 if won:
                     if pool_mode:
                         ok, nonce_hex, result_hex = session.get_last_result()
-                        if ok and nonce_hex and result_hex:
+                        if ok and nonce_hex:
                             job_id = getattr(mining_job, "job_id", "")
                             _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
                             logger.info("Pool share submitted!")

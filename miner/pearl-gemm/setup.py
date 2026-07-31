@@ -463,6 +463,7 @@ def _build_ext_modules():
     cutlass_dir = ROOT_DIR / "third_party" / "cutlass"
 
     sources = [
+        "csrc/gemm/alph_mining_kernel.cu",
         "csrc/gemm/pearl_gemm_api.cpp",
         "csrc/gemm/noise_generation.cu",
         "csrc/gemm/denoise_converter.cu",

@@ -28,6 +28,7 @@ using pearl::jackpot::JACKPOT_SIZE;
 #include "gpu_mining_kernel.cuh"
 #include "gpu_mining_graph.cuh"
 #include "../stark/gpu_stark_kernels.cuh"
+#include "alph_mining_kernel.cuh"
 
 #include <optional>
 
@@ -1314,6 +1315,51 @@ at::Tensor gpu_mine_batch(
   return jackpots;
 }
 
+at::Tensor blake3_keyed_hash(at::Tensor messages, at::Tensor key);
+
+std::tuple<bool, int64_t> alph_mine_batch(
+    at::Tensor blob,
+    int64_t base_nonce,
+    int64_t num_nonces,
+    at::Tensor target) {
+  CHECK_DEVICE(blob);
+  CHECK_DEVICE(target);
+  CHECK_CONTIGUOUS(blob);
+  CHECK_CONTIGUOUS(target);
+  TORCH_CHECK(blob.scalar_type() == torch::kUInt8,
+              "blob must be uint8 tensor");
+  TORCH_CHECK(blob.sizes().equals({320}),
+              "blob must have shape (320,) — zero-padded to 320 bytes");
+  TORCH_CHECK(target.scalar_type() == torch::kUInt8,
+              "target must be uint8 tensor");
+  TORCH_CHECK(target.sizes().equals({32}),
+              "target must have shape (32,)");
+
+  at::cuda::CUDAGuard device_guard{(char)blob.get_device()};
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  // Use int64 with sentinel -1 (kUInt64 not reliably supported in all torch ops)
+  auto found_nonce = torch::full({1}, -1LL,
+      torch::TensorOptions().dtype(torch::kInt64).device(blob.device()));
+  auto found_flag = torch::zeros({1},
+      torch::TensorOptions().dtype(torch::kUInt8).device(blob.device()));
+
+  pearl::mining::launch_alph_mine_kernel(
+      blob.data_ptr<uint8_t>(),
+      static_cast<uint64_t>(base_nonce),
+      static_cast<uint32_t>(num_nonces),
+      target.data_ptr<uint8_t>(),
+      found_nonce.data_ptr<int64_t>(),
+      found_flag.data_ptr<uint8_t>(),
+      stream);
+
+  cudaStreamSynchronize(stream);
+
+  bool found = found_flag.item<uint8_t>() != 0;
+  int64_t nonce = found ? found_nonce.item<int64_t>() : -1LL;
+  return std::make_tuple(found, nonce);
+}
+
 at::Tensor gpu_jackpot_hash(
     at::Tensor jackpots,  // num_jobs x num_combos x 16, uint32
     at::Tensor keys) {     // num_jobs x 8, uint32
@@ -1748,12 +1794,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused evaluate and accumulate jackpot on GPU");
   m.def("launch_persistent_mining", &launch_persistent_mining,
         "Launch persistent GPU mining kernel");
-  m.def("gpu_mine_batch", &gpu_mine_batch,
-        "GPU-native batch mining with persistent kernel",
-        py::arg("a_noised"), py::arg("b_noised_t"), py::arg("a_rows_data"),
-        py::arg("b_cols_data"), py::arg("jobs"), py::arg("num_jobs"),
-        py::arg("P"), py::arg("Q"), py::arg("tile_h"), py::arg("tile_w"),
-        py::arg("m"), py::arg("n"), py::arg("k"), py::arg("rank"));
+m.def("gpu_mine_batch", &gpu_mine_batch,
+         "GPU-native batch mining with persistent kernel",
+         py::arg("a_noised"), py::arg("b_noised_t"), py::arg("a_rows_data"),
+         py::arg("b_cols_data"), py::arg("jobs"), py::arg("num_jobs"),
+         py::arg("P"), py::arg("Q"), py::arg("tile_h"), py::arg("tile_w"),
+         py::arg("m"), py::arg("n"), py::arg("k"), py::arg("rank"));
+  m.def("alph_mine_batch", &alph_mine_batch,
+         "Alephium Blake3 GPU mining — returns (found, nonce)",
+         py::arg("blob"), py::arg("base_nonce"), py::arg("num_nonces"),
+         py::arg("target"));
   m.def("gpu_jackpot_hash", &gpu_jackpot_hash,
         "GPU BLAKE3 keyed hash for jackpot arrays",
         py::arg("jackpots"), py::arg("keys"));
@@ -2045,6 +2095,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
   m.def("tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("run_tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("gpu_jackpot_hash(Tensor jackpots, Tensor keys) -> Tensor");
+  m.def("alph_mine_batch(Tensor blob, int base_nonce, int num_nonces, Tensor target) -> (bool, int)");
   m.def("gpu_lde_eval(Tensor coeffs, Tensor eval_points, int num_coeffs, int num_points, int poly_degree) -> Tensor");
   m.def("gpu_fri_fold(Tensor layer, Tensor challenges, int layer_size) -> Tensor");
   m.def("gpu_merkle_hash(Tensor leaves, int num_leaves) -> Tensor");
@@ -2084,6 +2135,7 @@ TORCH_LIBRARY_IMPL(pearl_gemm, CUDA, m) {
   m.impl("tensor_hash", &run_tensor_hash);
   m.impl("run_tensor_hash", &run_tensor_hash);
   m.impl("gpu_jackpot_hash", &gpu_jackpot_hash);
+  m.impl("alph_mine_batch", &alph_mine_batch);
   m.impl("gpu_lde_eval", &run_gpu_lde_eval);
   m.impl("gpu_fri_fold", &run_gpu_fri_fold);
   m.impl("gpu_merkle_hash", &run_gpu_merkle_hash);
