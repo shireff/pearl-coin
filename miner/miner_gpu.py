@@ -563,10 +563,19 @@ def main():
         round_count = 0
         total_elapsed = 0.0
 
+        _current_job = None
+
         while True:
             try:
-                mining_job = _job_queue.get(timeout=5.0)
+                # Non-blocking: get new job if available, otherwise reuse last job
+                try:
+                    _current_job = _job_queue.get_nowait()
+                except _queue.Empty:
+                    if _current_job is None:
+                        # No job yet — block until first job arrives
+                        _current_job = _job_queue.get(timeout=5.0)
 
+                mining_job = _current_job
                 won = session.run_round(mining_job)
 
                 session._t_end.synchronize()

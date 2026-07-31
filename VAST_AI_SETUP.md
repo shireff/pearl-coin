@@ -221,6 +221,89 @@ GPU round time: 0.5ms, tmok/s=3800.xx  jobs=1  combos=64
 GPU round time: 0.6ms, tmok/s=3612.xx  jobs=1  combos=64
 ```
 
+## 4a. Pool Mining (Kryptex)
+
+The miner supports two modes: **solo** and **pool mining**. By default the commands above run in solo mode. For pool mining through Kryptex, use the `--pool-url` flag instead.
+
+### Solo vs Pool Mining
+
+| Mode | Connection | Rewards | When to use |
+|------|-----------|---------|-------------|
+| **Solo** | `--rpc-url` → local `pearld` | Only when you find a block yourself | Testing, very high hash rate |
+| **Pool** | `--pool-url` → Kryptex pool | Share-based, paid continuously | Normal mining |
+
+### What to edit for pool mining
+
+1. **Edit these three flags** to match your Kryptex account:
+
+```
+--pool-username <YOUR_KRX_USERNAME>.worker
+--pool-password x
+--pool-worker <WORKER_NAME>
+```
+
+Example:
+```
+--pool-username krxYM43GWD.worker
+--pool-password x
+--pool-worker worker
+```
+
+2. **Remove or ignore solo flags** when using pool mode:
+- `--rpc-url` is **not needed** in pool mode
+- `--rpc-user` and `--rpc-password` are **not needed** in pool mode
+- `--mining-address` is **not needed** in pool mode — the pool pays your registered Kryptex wallet automatically
+
+### Running in pool mode
+
+```bash
+cd ~/pearl-cion
+source /workspace/pearl-venv/bin/activate
+
+python miner/miner_gpu.py \
+  --pool-url stratum+tcp://alph.kryptex.network:7010 \
+  --pool-username krxYM43GWD.worker \
+  --pool-password x \
+  --pool-worker worker \
+  --noise-range 256 --P 8 --Q 8
+```
+
+### Persistently with log
+
+```bash
+tmux new-session -s mining
+
+cd ~/pearl-cion
+source /workspace/pearl-venv/bin/activate
+
+python miner/miner_gpu.py \
+  --pool-url stratum+tcp://alph.kryptex.network:7010 \
+  --pool-username krxYM43GWD.worker \
+  --pool-password x \
+  --pool-worker worker \
+  --noise-range 256 --P 8 --Q 8 \
+  2>&1 | tee /tmp/miner.log
+```
+
+### Expected pool output
+
+```
+INFO - Starting in POOL mode: stratum+tcp://alph.kryptex.network:7010
+INFO - Connected to pool successfully
+INFO - New job from pool: id=... target=0x1ffffffffffffffffffffffffffffffffffffffffffffffffffffff
+INFO - GPU round time: 240.0ms, tmok/s=8.50  jobs=1  combos=64
+```
+
+### Switching between modes
+
+To switch back to solo mining, replace `--pool-url ...` with the solo flags:
+```
+--rpc-url http://127.0.0.1:44107 \
+--rpc-user rpcuser \
+--rpc-password rpcpass \
+--mining-address <YOUR_WALLET_ADDRESS> \
+```
+
 ---
 
 ## ⚠️ **VERIFY THE MINER IS ACTUALLY RUNNING — NOT JUST APPEARING TO**
