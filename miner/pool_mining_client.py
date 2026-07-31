@@ -53,7 +53,10 @@ class PoolMiningClient:
         self._worker_id = ""
 
     def connect(self) -> bool:
-        worker = f"{self.username}.{self.worker_name}" if self.worker_name else self.username
+        if self.worker_name and "." not in self.username:
+            worker = f"{self.username}.{self.worker_name}"
+        else:
+            worker = self.username
         self._stratum = StratumClient(
             pool_url=self.pool_url,
             username=worker,

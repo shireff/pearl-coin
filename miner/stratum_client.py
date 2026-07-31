@@ -103,24 +103,23 @@ class StratumClient:
         if not self.is_connected():
             return False
 
-        worker = self.worker_name if self.worker_name else self.username.split(".")[0]
-
         if self.algorithm == "alephium":
-            params = [worker, job_id, nonce]
+            params = [self.username, job_id, nonce]
         else:
+            worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
 
         response = self._send_request("mining.submit", params, timeout=30.0)
         if response is None:
             return False
 
-        result = response.get("result", False)
+        result_val = response.get("result", False)
         error = response.get("error")
         if error:
             self._logger.warning(f"Pool submit error: {error}")
         else:
-            self._logger.info(f"Pool submit response: result={result}")
-        return result is True
+            self._logger.info(f"Pool submit response: result={result_val}")
+        return result_val is True
 
     def _subscribe_and_authorize(self) -> bool:
         subscribe_response = self._send_request("mining.subscribe", [])
@@ -159,6 +158,7 @@ class StratumClient:
         request = {"id": request_id, "method": method, "params": params}
         try:
             payload = json.dumps(request) + "\n"
+            self._logger.info(f"[STRATUM SEND] {payload.strip()}")
             self._sock.sendall(payload.encode("utf-8"))
         except Exception as e:
             self._logger.error(f"Failed to send request {method}: {e}")
@@ -210,6 +210,7 @@ class StratumClient:
             self.on_error("Connection lost")
 
     def _handle_message(self, raw: str) -> None:
+        self._logger.info(f"[STRATUM RECV] {raw}")
         try:
             message = json.loads(raw)
         except json.JSONDecodeError:
