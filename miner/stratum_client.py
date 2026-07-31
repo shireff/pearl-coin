@@ -106,7 +106,7 @@ class StratumClient:
         worker = self.worker_name if self.worker_name else self.username.split(".")[0]
 
         if self.algorithm == "alephium":
-            params = [job_id, nonce, worker]
+            params = [worker, job_id, nonce]
         else:
             params = [job_id, nonce, result, worker]
 
