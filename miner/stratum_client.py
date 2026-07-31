@@ -168,7 +168,6 @@ class StratumClient:
 
     def _read_loop(self) -> None:
         buffer = ""
-        self._logger.info("_read_loop started")
         while not self._stop_event.is_set() and self._connected:
             try:
                 data = self._sock.recv(4096)
@@ -178,14 +177,12 @@ class StratumClient:
                     break
 
                 buffer += data.decode("utf-8", errors="replace")
-                self._logger.info(f"Received {len(data)} bytes")
 
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     line = line.strip()
                     if not line:
                         continue
-                    self._logger.info(f"RAW from pool: {line[:200]}")
                     self._handle_message(line)
             except Exception as e:
                 if not self._stop_event.is_set():
@@ -204,7 +201,6 @@ class StratumClient:
             return
 
         if "method" in message:
-            self._logger.info(f"Notification from pool: {message.get('method')} params={message.get('params')}")
             self._handle_notification(message)
         elif "id" in message:
             self._handle_response(message)
@@ -224,8 +220,6 @@ class StratumClient:
 
     def _handle_mining_notify(self, params: list) -> None:
         try:
-            self._logger.debug(f"mining.notify raw params: {params}")
-            
             if len(params) == 0:
                 self._logger.warning("mining.notify with empty params")
                 return
@@ -248,10 +242,8 @@ class StratumClient:
                 self._logger.warning(f"Unexpected mining.notify format: {type(param0)}")
                 return
 
-            self._logger.debug(f"job_id={job_id} header_len={len(header_blob_hex)} target_len={len(target_blob_hex)} height={height}")
-
             if not header_blob_hex or not target_blob_hex:
-                self._logger.warning(f"Empty header/target from pool: header='{header_blob_hex[:32]}...' target='{target_blob_hex[:32]}...'")
+                self._logger.warning(f"Empty header/target from pool")
                 return
 
             blob = bytes.fromhex(header_blob_hex)
@@ -275,8 +267,6 @@ class StratumClient:
                 self.on_job(job)
         except Exception as e:
             self._logger.error(f"Failed to parse mining.notify: {e}")
-            import traceback
-            traceback.print_exc()
 
     def _handle_set_difficulty(self, params: list) -> None:
         try:
