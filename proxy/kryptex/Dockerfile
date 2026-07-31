@@ -2,11 +2,11 @@ FROM golang:1.26 AS builder
 
 WORKDIR /app
 
-COPY kryptex/go.mod kryptex/go.sum ./
+COPY go.mod go.sum ./
 RUN go mod download
 
-COPY kryptex/ ./src/
-RUN CGO_ENABLED=0 go build -o /kryptex-proxy ./src/
+COPY . .
+RUN CGO_ENABLED=0 go build -o /kryptex-proxy .
 
 FROM debian:bookworm-slim
 

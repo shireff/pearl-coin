@@ -1,0 +1,36 @@
+services:
+  kryptex-proxy:
+    build:
+      context: ../..
+      dockerfile: proxy/kryptex/Dockerfile
+    container_name: pearl-kryptex
+    ports:
+      - "3333:3333"
+      - "9900:9900"
+    environment:
+      PEARLD_RPC_URL: http://pearld:44107
+      PEARLD_RPC_USER: rpcuser
+      PEARLD_RPC_PASSWORD: rpcpass
+      STRATUM_PORT: 3333
+      STRATUM_TLS: "false"
+      STRATUM_DIFFICULTY: "1"
+      MAX_CONNECTIONS: "1000"
+      HEALTH_PORT: "9900"
+    depends_on:
+      - pearld
+    restart: unless-stopped
+
+  pearld:
+    image: ghcr.io/pearl-research-labs/pearld:latest
+    container_name: pearl-node
+    ports:
+      - "44107:44107"
+      - "44108:44108"
+    environment:
+      PEARLD_RPC_URL: http://0.0.0.0:44107
+      PEARLD_RPC_USER: rpcuser
+      PEARLD_RPC_PASSWORD: rpcpass
+      PEARLD_MINING_ADDRESS: prl1pmt5e954cpepqmvnpm8sfywmjhvupjpdd5trtkdw8jca86auuvlls45s2x8
+    volumes:
+      - pearld-data:/root/.pearld
+    restart: unless-stopped

@@ -243,3 +243,25 @@ elapsed = start_event.elapsed_time(end_event) / 1000
 2. **اختبر بعد كل تغيير** لضمان عدم كسر الوظائف الحالية
 3. **راقب استهلاك الذاكرة** مع زيادة tile size و P×Q
 4. **استخدم `nvidia-smi`** لمراقبة GPU utilization أثناء الاختبار
+---
+
+## Kryptex Pool Support
+
+Added a Kryptex Stratum V1 proxy in \proxy/kryptex/\ that bridges Kryptex Pool miners to the Pearl node JSON-RPC interface.
+
+### Files Added
+
+| File | Description |
+|------|-------------|
+| \proxy/kryptex/go.mod\ | Go module definition |
+| \proxy/kryptex/config.go\ | Proxy configuration with environment variables |
+| \proxy/kryptex/client.go\ | JSON-RPC client for Pearl node communication |
+| \proxy/kryptex/stratum.go\ | Stratum V1 protocol implementation |
+| \proxy/kryptex/main.go\ | Proxy server (listener, health endpoint, shutdown) |
+| \proxy/kryptex/kryptex_config.go\ | Kryptex Pool endpoint definitions for PRL, BTC, LTC, ETHW, RVN |
+| \proxy/kryptex/tests/stratum_test.go\ | Stratum client unit tests |
+| \proxy/kryptex/tests/config_test.go\ | Config and coin config unit tests |
+| \proxy/kryptex/Dockerfile\ | Docker image for the Kryptex proxy |
+| \proxy/kryptex/README.md\ | Kryptex proxy documentation |
+| \proxy/docker-compose.kryptex.yml\ | Docker Compose for Kryptex proxy + Pearl node |
+| \instance.env\ | Added Kryptex proxy env vars (STRATUM_PORT, STRATUM_TLS, etc.) |
