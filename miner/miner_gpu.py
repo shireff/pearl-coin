@@ -486,6 +486,24 @@ class AlephiumMiningSession:
         self._base_nonce += self.nonces_per_round
         self._last_found = bool(found)
         self._last_nonce = int(nonce)
+
+        # Diagnostic: log every 1000 rounds to confirm shares are being found
+        if not hasattr(self, "_round_count"):
+            self._round_count = 0
+        self._round_count += 1
+        if self._round_count % 1000 == 1:
+            import logging as _log
+            _log.getLogger("miner_gpu").info(
+                f"[Alephium diag] round={self._round_count} base_nonce={self._base_nonce} "
+                f"found={found} nonce={nonce} "
+                f"target_hex={job.target:#x}"
+            )
+        if found:
+            import logging as _log
+            _log.getLogger("miner_gpu").info(
+                f"[Alephium WINNER] nonce={nonce} job_id={getattr(job, 'job_id', '?')}"
+            )
+
         return self._last_found, self._last_nonce
 
     def get_last_result(self) -> tuple[bool, str, str]:
@@ -680,10 +698,14 @@ def main():
                 if won:
                     if pool_mode:
                         ok, nonce_hex, result_hex = session.get_last_result()
+                        logger.info(f"SHARE FOUND: ok={ok} nonce_hex={nonce_hex[:16] if nonce_hex else 'None'}...")
                         if ok and nonce_hex:
                             job_id = getattr(mining_job, "job_id", "")
-                            _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
-                            logger.info("Pool share submitted!")
+                            success = _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
+                            if success:
+                                logger.info(f"Pool share ACCEPTED! job_id={job_id}")
+                            else:
+                                logger.warning(f"Pool share REJECTED. job_id={job_id} nonce={nonce_hex[:16]}...")
                         else:
                             logger.warning("Won but could not extract nonce/result for pool")
                     else:
