@@ -9,7 +9,9 @@ namespace mining {
 
 // ── Alephium Blake3 PoW mining kernel ────────────────────────────────────────
 //
-// Alephium header = 302 bytes. Nonce field = last 24 bytes [278:302].
+// Alephium header = 302 bytes.
+//   bytes [278:294] = 16 bytes of pool header data (preserve as-is)
+//   bytes [294:302] = 8-byte nonce uint64 big-endian (miner varies this)
 // PoW check: Blake3(header_with_nonce) <= target  (big-endian comparison).
 //
 // Optimization strategy:
@@ -28,9 +30,9 @@ static constexpr int PADDED_BLOCKS = 5;       // ceil(302/64) = 5 Blake3 blocks
 static constexpr int PADDED_BYTES  = PADDED_BLOCKS * 64;   // 320 bytes
 static constexpr int PADDED_WORDS  = PADDED_BYTES / 4;     // 80 uint32 words
 
-// Nonce field: bytes [278:302] = 24 bytes.
-// Encoded as big-endian: first 16 bytes are 0x00, last 8 bytes are the nonce uint64.
-// Padded buffer word index for nonce start: 278/4 = 69 (with 2-byte offset inside word 69).
+// Nonce field: bytes [278:302] = 24 bytes total.
+// bytes [278:294] = pool header data (preserved from blob, NOT modified).
+// bytes [294:302] = nonce as big-endian uint64 (miner varies this).
 // Nonce uint64 spans bytes [294:302]: words 73 (partial), 74 (full), 75 (partial).
 static constexpr int NONCE_WORD_START = 69;   // word index in padded buffer where nonce field begins
 static constexpr int NONCE_UINT64_WORD = 73;  // word index where nonce uint64 big-endian data starts
@@ -73,56 +75,50 @@ void alph_mine_kernel(
         r[i] = s_blob[i];
 
     // ── 5. Inject nonce into register blob ───────────────────────────────
-    // Alephium nonce field = bytes [278:302] = 24 bytes.
-    // Encoding: 16 zero bytes followed by nonce as big-endian uint64.
-    // See file-level comment and the detailed layout comment below for
-    // the exact word-by-word nonce encoding.
+    // Alephium nonce uint64 = bytes [294:302], big-endian.
+    // Bytes [278:294] are pool header data and must be preserved intact.
+    // Only words 73-75 are modified; words 69-72 remain unchanged.
 
-    // Nonce field = bytes [278:302] = 24 bytes:
-    //   bytes [278:294] = zeros (16-byte prefix)
-    //   bytes [294:302] = nonce as big-endian uint64
+    // Alephium nonce layout in the 302-byte blob:
+    //   bytes [278:294] = 16 bytes from pool header (preserve as-is, NOT zeros)
+    //   bytes [294:302] = 8-byte nonce uint64 big-endian (miner varies this)
     //
     // Memory layout (little-endian uint32 words):
-    //   word 69 = bytes [276:280]: preserve [276:278], zero [278:280]
-    //   word 70 = bytes [280:284]: zero
-    //   word 71 = bytes [284:288]: zero
-    //   word 72 = bytes [288:292]: zero
-    //   word 73 = bytes [292:296]: [292:294]=zero, [294:296]=nonce_be[0:2]
+    //   word 69 = bytes [276:280]: pool data, preserve entirely
+    //   word 70 = bytes [280:284]: pool data, preserve entirely
+    //   word 71 = bytes [284:288]: pool data, preserve entirely
+    //   word 72 = bytes [288:292]: pool data, preserve entirely
+    //   word 73 = bytes [292:296]: [292:294]=pool data, [294:296]=nonce_be[0:2]
     //   word 74 = bytes [296:300]: nonce_be[2:6]
     //   word 75 = bytes [300:304]: [300:302]=nonce_be[6:8], [302:304]=padding zeros
-
-    // Preserve lower 2 bytes of word 69 (bytes 276,277), zero upper 2 (bytes 278,279)
-    r[69] = r[69] & 0x0000FFFFu;
-    r[70] = 0u;
-    r[71] = 0u;
-    r[72] = 0u;
+    //
+    // Words 69-72 come from the blob loaded into registers — no modification needed.
+    // Only words 73-75 are updated with the nonce uint64.
 
     // Nonce uint64 as big-endian bytes:
-    //   nonce_be[0] = (nonce >> 56) & 0xFF
-    //   nonce_be[7] = nonce & 0xFF
+    //   nonce_be[0] = (nonce >> 56) & 0xFF  (most significant)
+    //   nonce_be[7] = nonce & 0xFF           (least significant)
     // Split into three uint32 words covering bytes 292-304:
-    //   word73[31:16] = 0x0000  (bytes 292-293 = zero)
+    //   word73[31:16] = pool data bytes 292-293 (preserved from r[73])
     //   word73[15:0]  = nonce_be[0:2] = nonce >> 48 as big-endian 16-bit
     //   word74[31:0]  = nonce_be[2:6] = nonce[47:16] as big-endian 32-bit
     //   word75[31:16] = nonce_be[6:8] = nonce[15:0] as big-endian 16-bit
-    //   word75[15:0]  = 0x0000  (bytes 302-303 = padding)
+    //   word75[15:0]  = 0x0000  (bytes 302-303 = padding zeros)
 
     uint16_t n0 = static_cast<uint16_t>((nonce >> 48) & 0xFFFF);
     uint32_t n1 = static_cast<uint32_t>((nonce >> 16) & 0xFFFFFFFF);
     uint16_t n2 = static_cast<uint16_t>(nonce & 0xFFFF);
 
-    // word73: upper 16 bits = 0x0000, lower 16 bits = n0 big-endian
-    // In LE uint32: byte 292=0, byte293=0, byte294=n0_hi, byte295=n0_lo
-    r[73] = (static_cast<uint32_t>(__byte_perm(n0, 0, 0x0001)) << 16);
+    // word73: preserve upper 16 bits (bytes 292-293 from pool), set lower 16 bits = n0 big-endian
+    // In LE uint32: byte292=pool, byte293=pool, byte294=n0_hi, byte295=n0_lo
+    r[73] = (r[73] & 0xFFFF0000u) | static_cast<uint32_t>(__byte_perm(n0, 0, 0x0001));
 
     // word74: n1 as big-endian uint32
-    // bytes [296:300] = n1 in big-endian
+    // bytes [296:300] = nonce_be[2:6]
     r[74] = __byte_perm(n1, 0, 0x0123);
 
-    // word75: upper 16 bits = n2 big-endian, lower 16 bits = 0x0000
-    // bytes [300:302] = n2 big-endian, bytes [302:304] = padding zeros (must be zero)
-    // Without the mask, __byte_perm would duplicate n2's low byte into bits[15:0],
-    // corrupting bytes 302-303 and producing wrong Blake3 hash output.
+    // word75: upper 16 bits = n2 big-endian, lower 16 bits = 0x0000 (padding)
+    // bytes [300:302] = nonce_be[6:8], bytes [302:304] = padding zeros
     r[75] = static_cast<uint32_t>(__byte_perm(n2, 0, 0x0001)) & 0x0000FFFFu;
 
     // ── 6. Multi-block Blake3 in registers ───────────────────────────────
