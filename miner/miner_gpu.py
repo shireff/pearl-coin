@@ -565,12 +565,14 @@ def main():
         _keepalive_stop = threading.Event()
 
         def _gpu_keepalive():
-            _dummy = torch.zeros(1, device="cuda")
+            # Use a small matmul to actually wake the GPU and keep it at P0.
+            # torch.zeros(1).add_(0) is too lightweight — GPU ignores it.
+            _a = torch.ones(32, 32, device="cuda", dtype=torch.float16)
+            _b = torch.ones(32, 32, device="cuda", dtype=torch.float16)
             while not _keepalive_stop.is_set():
-                # Tiny non-blocking op — just enough to keep GPU active
-                _dummy.add_(0)
+                torch.mm(_a, _b)
                 torch.cuda.synchronize()
-                time.sleep(0.01)
+                time.sleep(0.005)
 
         if pool_mode:
             _keepalive_thread = threading.Thread(target=_gpu_keepalive, daemon=True)

@@ -119,6 +119,10 @@ class PoolMiningClient:
         self._logger.error(f"Pool error: {error}")
         self._connected = False
 
+    def close(self) -> None:
+        """Close the pool connection cleanly."""
+        self.disconnect()
+
     def _convert_job(self, stratum_job: StratumJob) -> None:
         with self._job_lock:
             self._current_job = PoolMiningJob(
