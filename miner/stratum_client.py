@@ -224,19 +224,38 @@ class StratumClient:
 
     def _handle_mining_notify(self, params: list) -> None:
         try:
-            self._logger.debug(f"mining.notify params: {params}")
-            job_id = str(params[0]) if len(params) > 0 else ""
-            blob_hex = str(params[1]) if len(params) > 1 else ""
-            target_hex = str(params[2]) if len(params) > 2 else ""
-
-            self._logger.debug(f"job_id={job_id} blob_len={len(blob_hex)} target_len={len(target_hex)}")
-
-            if not blob_hex or not target_hex:
-                self._logger.warning(f"Empty blob or target from pool: blob_hex='{blob_hex}' target_hex='{target_hex}'")
+            self._logger.debug(f"mining.notify raw params: {params}")
+            
+            if len(params) == 0:
+                self._logger.warning("mining.notify with empty params")
                 return
 
-            blob = bytes.fromhex(blob_hex)
-            target = int(target_hex, 16)
+            param0 = params[0]
+            
+            if isinstance(param0, dict):
+                job_id = str(param0.get("jobId", ""))
+                header_blob_hex = str(param0.get("headerBlob", ""))
+                target_blob_hex = str(param0.get("targetBlob", ""))
+                height = param0.get("height", 0)
+                txs_blob_hex = str(param0.get("txsBlob", ""))
+            elif isinstance(param0, str) and len(params) >= 3:
+                job_id = str(param0)
+                header_blob_hex = str(params[1])
+                target_blob_hex = str(params[2])
+                height = 0
+                txs_blob_hex = ""
+            else:
+                self._logger.warning(f"Unexpected mining.notify format: {type(param0)}")
+                return
+
+            self._logger.debug(f"job_id={job_id} header_len={len(header_blob_hex)} target_len={len(target_blob_hex)} height={height}")
+
+            if not header_blob_hex or not target_blob_hex:
+                self._logger.warning(f"Empty header/target from pool: header='{header_blob_hex[:32]}...' target='{target_blob_hex[:32]}...'")
+                return
+
+            blob = bytes.fromhex(header_blob_hex)
+            target = int(target_blob_hex, 16)
 
             job = StratumJob(
                 job_id=job_id,
@@ -249,13 +268,15 @@ class StratumClient:
                 self._current_job = job
 
             self._logger.info(
-                f"New job from pool: id={job_id} target={target:#x} blob_len={len(blob)}"
+                f"New job from pool: id={job_id} target={target:#x} blob_len={len(blob)} height={height}"
             )
 
             if self.on_job:
                 self.on_job(job)
         except Exception as e:
             self._logger.error(f"Failed to parse mining.notify: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _handle_set_difficulty(self, params: list) -> None:
         try:
