@@ -110,11 +110,17 @@ class StratumClient:
         else:
             params = [job_id, nonce, result, worker]
 
-        response = self._send_request("mining.submit", params)
+        response = self._send_request("mining.submit", params, timeout=30.0)
         if response is None:
             return False
 
-        return response.get("result", False) is True
+        result = response.get("result", False)
+        error = response.get("error")
+        if error:
+            self._logger.warning(f"Pool submit error: {error}")
+        else:
+            self._logger.info(f"Pool submit response: result={result}")
+        return result is True
 
     def _subscribe_and_authorize(self) -> bool:
         subscribe_response = self._send_request("mining.subscribe", [])
