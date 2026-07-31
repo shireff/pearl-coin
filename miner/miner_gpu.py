@@ -684,8 +684,8 @@ def main():
                 session._t_end.synchronize()
                 elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0
                 if isinstance(session, AlephiumMiningSession):
-                    tmok_per_s = 0.0
-                    logger.info(f"GPU round time: {elapsed*1000:.1f}ms  nonces={session.nonces_per_round}")
+                    mnonces_per_s = session.nonces_per_round / elapsed / 1e6 if elapsed > 0 else 0.0
+                    logger.info(f"GPU round time: {elapsed*1000:.1f}ms  nonces={session.nonces_per_round}  speed={mnonces_per_s:.0f} Mnonces/s")
                 else:
                     tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                     tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
