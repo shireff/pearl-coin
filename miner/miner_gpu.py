@@ -548,7 +548,7 @@ def main():
                             _job_queue.put_nowait(job)
                         except _q.Full:
                             pass
-                            time.sleep(0.02)
+                        time.sleep(0.02)
                 except Exception as e:
                     if pool_mode and isinstance(e, RuntimeError):
                         logger.warning(f"Prefetch: pool job unavailable — {e}")
