@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable, Optional
 
 _local_root = Path(__file__).resolve().parent
 _local_pearl_gemm_src = str(_local_root / "pearl-gemm" / "src")
