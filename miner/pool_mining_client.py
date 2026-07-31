@@ -17,6 +17,7 @@ class PoolMiningJob:
     job_id: str = ""
     blob: bytes = field(default=b"")
     difficulty: float = 1.0
+    height: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,4 +138,5 @@ class PoolMiningClient:
                 job_id=stratum_job.job_id,
                 blob=stratum_job.blob,
                 difficulty=stratum_job.difficulty,
+                height=getattr(stratum_job, "height", 0) or 0,
             )

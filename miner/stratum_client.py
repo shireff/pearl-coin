@@ -269,6 +269,7 @@ class StratumClient:
                 job_id=job_id,
                 blob=blob,
                 target=target,
+                height=height,
                 clean_jobs=True,
             )
 
