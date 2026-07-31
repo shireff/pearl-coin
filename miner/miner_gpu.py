@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _local_root = Path(__file__).resolve().parent
@@ -29,11 +30,23 @@ from pearl_gemm import (
     gpu_jackpot_hash,
 )
 
+from pool_mining_client import PoolMiningClient, PoolMiningJob
+
+
 DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
 DEFAULT_GATEWAY_TCP_PORT = 8337
 SUPPORTED_NOISE_RANKS = (64, 128)
 JOB_STRUCT_BYTES = 128
 DEFAULT_MAX_SHARED_MEMORY_BYTES = 100_000
+
+
+@dataclass
+class MiningResult:
+    won: bool
+    nonce_hex: str = ""
+    result_hex: str = ""
+    job_id: str = ""
+    combo_index: int = -1
 
 
 def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = "cuda") -> torch.Tensor:
@@ -149,6 +162,15 @@ def parse_args():
     g.add_argument("--rpc-user", default=None)
     g.add_argument("--rpc-password", default=None)
     g.add_argument("--mining-address", default=None)
+    g = parser.add_argument_group("Pool mining (Stratum)")
+    g.add_argument("--pool-url", default=None,
+                   help="Stratum pool URL (e.g. stratum+tcp://pool.example.com:3333)")
+    g.add_argument("--pool-username", default=None,
+                   help="Pool username (wallet.worker format)")
+    g.add_argument("--pool-password", default="x",
+                   help="Pool password (default: x)")
+    g.add_argument("--pool-worker", default="",
+                   help="Worker name (default: auto from username)")
     g = parser.add_argument_group("Gateway connection")
     g.add_argument("--gateway-socket", default=os.environ.get("MINER_RPC_SOCKET_PATH", DEFAULT_GATEWAY_SOCKET))
     g.add_argument("--gateway-tcp", action="store_true", default=os.environ.get("MINER_RPC_TRANSPORT", "uds").lower() == "tcp")
@@ -286,6 +308,10 @@ class MiningGraphSession:
         self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
         self.hashes     = torch.empty((num_jobs, self.num_combos, 8), dtype=torch.uint32, device="cuda")
 
+        self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
+        self._last_hashes: Optional[torch.Tensor] = None
+        self._last_keys: Optional[torch.Tensor] = None
+
         # ── Pre-allocated target buffer (updated in-place each round) ────
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
 
@@ -331,7 +357,6 @@ class MiningGraphSession:
     def run_round(self, mining_job: MiningJob) -> bool:
         self._t_start.record()
 
-        # ── Refresh noise keys in-place, then replay captured noise_gen graph ──
         self.key_A.random_(0, 256)
         self.key_B.random_(0, 256)
         if self._noise_graph is not None:
@@ -346,7 +371,6 @@ class MiningGraphSession:
                 key_A=self.key_A, key_B=self.key_B,
             )
 
-        # ── GPU mining kernel — dispatched on dedicated stream ────────────
         with torch.cuda.stream(self._mining_stream):
             jackpots = gpu_mine_batch(
                 self.A_noised,
@@ -359,14 +383,9 @@ class MiningGraphSession:
                 self.tile_h, self.tile_w,
                 self.m, self.n, self.k, self.rank,
             )
-        # Sync mining stream before reading results
         self._mining_stream.synchronize()
 
-        # ── Winner check: hash jackpots and compare to target ─────────────
-        # Hash the jackpot arrays to get final hashes
         hashes = gpu_jackpot_hash(jackpots, self.keys)
-        
-        # Update target in-place using vectorized bit-extraction (no Python loop)
         _target_int = int(mining_job.target)
         _shifts = torch.arange(8, dtype=torch.int64, device="cuda") * 32
         self._target_buf.copy_(
@@ -375,11 +394,27 @@ class MiningGraphSession:
                 dtype=torch.int64, device="cpu"
             ).cuda(non_blocking=True)
         )
-        # Winner check: all 8 uint32 words of hash must be <= target
         hashes_i64 = hashes.view(-1, 8).to(dtype=torch.int64)
         any_winner = (hashes_i64 <= self._target_buf.unsqueeze(0)).all(dim=-1).any()
+        self._last_hashes = hashes_i64.cpu()
+        self._last_keys = self.keys.cpu()
         self._t_end.record()
         return bool(any_winner)
+
+    def get_last_result(self) -> tuple[bool, Optional[str], Optional[str]]:
+        if not hasattr(self, "_last_hashes") or self._last_hashes is None:
+            return False, None, None
+        flat = self._last_hashes.view(-1, 8)
+        target_cpu = self._target_buf.cpu()
+        winners = (flat <= target_cpu.unsqueeze(0)).all(dim=-1)
+        if not winners.any():
+            return False, None, None
+        idx = int(winners.argmax().item())
+        winner_hash = flat[idx]
+        nonce_bytes = self._last_keys[idx % self.num_jobs].numpy().tobytes()
+        result_hex = bytes(winner_hash.numpy().astype("<I").tobytes()).hex()
+        nonce_hex = nonce_bytes.hex()
+        return True, nonce_hex, result_hex
 
     def build_proof(self, mining_job: MiningJob):
         from pearl_gateway.comm.dataclasses import OpenedBlockInfo
@@ -409,34 +444,49 @@ def main():
     client = None
     gateway_proc = None
     managed_gateway = False
+    pool_mode = args.pool_url is not None
     session = None
 
     try:
-        if args.rpc_url is not None:
-            managed_gateway = True
-            socket_path = args.gateway_socket if not args.gateway_tcp else None
-            if not args.gateway_tcp and os.path.exists(socket_path):
-                os.remove(socket_path)
-            logger.info("Starting managed pearl-gateway process...")
-            gateway_proc = start_gateway_process(
-                args.rpc_url, args.rpc_user, args.rpc_password, args.mining_address,
+        if pool_mode:
+            logger.info(f"Starting in POOL mode: {args.pool_url}")
+            client = PoolMiningClient(
+                pool_url=args.pool_url,
+                username=args.pool_username,
+                password=args.pool_password,
+                worker_name=args.pool_worker,
             )
-            if not args.gateway_tcp:
-                threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
-                if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30, logger=logger):
-                    logger.error(f"Gateway socket {socket_path} never appeared")
-                    return 1
-                logger.info(f"Gateway socket ready: {socket_path}")
-            else:
-                threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
-                time.sleep(2)
+            if not client.connect():
+                logger.error("Failed to connect to pool")
+                return 1
+            logger.info("Connected to pool successfully")
+        else:
+            if args.rpc_url is not None:
+                managed_gateway = True
+                socket_path = args.gateway_socket if not args.gateway_tcp else None
+                if not args.gateway_tcp and os.path.exists(socket_path):
+                    os.remove(socket_path)
+                logger.info("Starting managed pearl-gateway process...")
+                gateway_proc = start_gateway_process(
+                    args.rpc_url, args.rpc_user, args.rpc_password, args.mining_address,
+                )
+                if not args.gateway_tcp:
+                    threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
+                    if not wait_for_gateway_socket(gateway_proc, socket_path, timeout=30, logger=logger):
+                        logger.error(f"Gateway socket {socket_path} never appeared")
+                        return 1
+                    logger.info(f"Gateway socket ready: {socket_path}")
+                else:
+                    threading.Thread(target=stream_logs, args=("gateway", gateway_proc), daemon=True).start()
+                    time.sleep(2)
 
-        rpc_config = MinerRpcConfig(
-            transport="tcp" if args.gateway_tcp else "uds",
-            socket_path=args.gateway_socket if not args.gateway_tcp else None,
-            host=args.gateway_host,
-            port=args.gateway_port,
-        )
+            rpc_config = MinerRpcConfig(
+                transport="tcp" if args.gateway_tcp else "uds",
+                socket_path=args.gateway_socket if not args.gateway_tcp else None,
+                host=args.gateway_host,
+                port=args.gateway_port,
+            )
+            client = MiningClient(rpc_config)
 
         shared_mem_limit = get_cuda_shared_memory_limit()
         gpu_name = get_gpu_name()
@@ -456,6 +506,8 @@ def main():
 
         logger.info(f"GPU: {gpu_name or 'unknown'}  shared_mem_limit={shared_mem_limit // 1024} KB")
         logger.info(f"tile=({tile_m},{tile_n})  rank={args.noise_rank}  noise_range={args.noise_range}")
+        if pool_mode:
+            logger.info(f"Pool: {args.pool_url}  user={args.pool_username}")
 
         settings = MinerSettings(
             noise_range=args.noise_range,
@@ -464,7 +516,6 @@ def main():
             tile_size_n=tile_n,
             tile_size_k=args.tile_k,
         )
-        client = MiningClient(rpc_config)
 
         P = args.P
         Q = args.Q
@@ -475,11 +526,9 @@ def main():
         logger.info(f"Session ready — tile=({session.tile_h},{session.tile_w})  smem={smem_kb} KB  num_jobs={num_jobs}  P={session.P}  Q={session.Q}  combos={session.P*session.Q}")
 
         import queue as _queue
-        # ── Prefetch queue: background thread fetches next job while GPU runs ──
         _job_queue: _queue.Queue = _queue.Queue(maxsize=2)
         _stop_prefetch = threading.Event()
 
-        # Thread-safe client wrapper — use a list so inner function can rebind it
         _client_ref = [client]
 
         def _prefetch_worker():
@@ -487,11 +536,9 @@ def main():
             while not _stop_prefetch.is_set():
                 try:
                     job = _client_ref[0].get_mining_info()
-                    # Use put_nowait + discard oldest if full to avoid blocking
                     try:
                         _job_queue.put_nowait(job)
                     except _q.Full:
-                        # Queue is full — discard oldest, add newest (latest job preferred)
                         try:
                             _job_queue.get_nowait()
                         except _q.Empty:
@@ -500,20 +547,11 @@ def main():
                             _job_queue.put_nowait(job)
                         except _q.Full:
                             pass
-                except BrokenPipeError:
-                    logger.warning("Prefetch: gateway connection lost — reconnecting in 3s...")
-                    time.sleep(3)
-                    try:
-                        _client_ref[0].close()
-                    except Exception:
-                        pass
-                    try:
-                        _client_ref[0] = MiningClient(rpc_config)
-                        logger.info("Prefetch: reconnected to gateway")
-                    except Exception as e:
-                        logger.error(f"Prefetch: reconnect failed: {e}")
-                        time.sleep(5)
                 except Exception as e:
+                    if pool_mode and isinstance(e, RuntimeError):
+                        logger.warning(f"Prefetch: pool job unavailable — {e}")
+                        time.sleep(1)
+                        continue
                     logger.debug(f"Prefetch error: {type(e).__name__}: {e}")
                     time.sleep(0.05)
 
@@ -526,27 +564,33 @@ def main():
 
         while True:
             try:
-                # Get pre-fetched job (GPU is idle only if queue is empty)
-                mining_job: MiningJob = _job_queue.get(timeout=5.0)
+                mining_job = _job_queue.get(timeout=5.0)
 
                 won = session.run_round(mining_job)
 
-                # Sync CUDA events to get accurate GPU kernel time
                 session._t_end.synchronize()
-                elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0  # ms → s
-                # tmok = nonces per round = tile_h × tile_w × P × Q / rank / 1000
+                elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0
                 tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                 tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
 
                 logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
 
                 if won:
-                    plain_proof = session.build_proof(mining_job)
-                    _client_ref[0].submit_plain_proof(plain_proof, mining_job)
-                    logger.info("Block found and submitted!")
+                    if pool_mode:
+                        ok, nonce_hex, result_hex = session.get_last_result()
+                        if ok and nonce_hex and result_hex:
+                            job_id = getattr(mining_job, "job_id", "")
+                            _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
+                            logger.info("Pool share submitted!")
+                        else:
+                            logger.warning("Won but could not extract nonce/result for pool")
+                    else:
+                        plain_proof = session.build_proof(mining_job)
+                        _client_ref[0].submit_plain_proof(plain_proof, mining_job)
+                        logger.info("Block found and submitted!")
 
             except _queue.Empty:
-                logger.warning("Job queue empty — waiting for gateway...")
+                logger.warning("Job queue empty — waiting for jobs...")
             except KeyboardInterrupt:
                 _stop_prefetch.set()
                 raise
@@ -554,7 +598,7 @@ def main():
                 import traceback as _tb
                 tb = _tb.extract_tb(exc.__traceback__)
                 last = tb[-1] if tb else None
-                location = f"{last.filename}:{last.lineno} in {last.name}" if last else "unknown"
+                location = f"{last.filename}:{last.lineno} in {last.func}" if last else "unknown"
                 logger.error(f"Mining round failed — {type(exc).__name__}: {exc}  [at {location}]")
 
     except KeyboardInterrupt:
