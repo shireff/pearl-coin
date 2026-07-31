@@ -237,7 +237,15 @@ func (s *server) log(level, msg string, keysAndVals ...interface{}) {
 }
 
 func loadConfig() Config {
-	var config Config
+	config := Config{
+		PearlNodeURL:      "http://127.0.0.1:44107",
+		PearlNodeUser:     "rpcuser",
+		PearlNodePass:     "rpcpass",
+		StratumPort:       3333,
+		StratumDifficulty:  1,
+		HealthPort:         9900,
+		MaxConnections:     1000,
+	}
 
 	v := os.Getenv("PEARLD_RPC_URL")
 	if v != "" {
