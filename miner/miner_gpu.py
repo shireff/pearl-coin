@@ -524,21 +524,20 @@ def main():
 
         if pool_mode:
             logger.info(f"Starting in POOL mode: {args.pool_url}")
+            # Detect algorithm BEFORE connect so StratumClient is built with correct algorithm
+            pool_algorithm = detect_pool_algorithm(args.pool_url)
+            logger.info(f"Detected pool algorithm: {pool_algorithm}")
             client = PoolMiningClient(
                 pool_url=args.pool_url,
                 username=args.pool_username,
                 password=args.pool_password,
                 worker_name=args.pool_worker,
+                algorithm=pool_algorithm,
             )
             if not client.connect():
                 logger.error("Failed to connect to pool")
                 return 1
             logger.info("Connected to pool successfully")
-
-            # Detect algorithm from URL — no racy first-job fetch needed
-            pool_algorithm = detect_pool_algorithm(args.pool_url)
-            logger.info(f"Detected pool algorithm: {pool_algorithm}")
-            client.algorithm = pool_algorithm
         else:
             if args.rpc_url is not None:
                 managed_gateway = True
@@ -659,7 +658,10 @@ def main():
                         _current_job = _job_queue.get(timeout=5.0)
 
                 mining_job = _current_job
-                won = session.run_round(mining_job)
+                if isinstance(session, AlephiumMiningSession):
+                    won, _winning_nonce = session.run_round(mining_job)
+                else:
+                    won = session.run_round(mining_job)
 
                 session._t_end.synchronize()
                 elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0
@@ -698,7 +700,7 @@ def main():
                 import traceback as _tb
                 tb = _tb.extract_tb(exc.__traceback__)
                 last = tb[-1] if tb else None
-                location = f"{last.filename}:{last.lineno} in {last.func}" if last else "unknown"
+                location = f"{last.filename}:{last.lineno} in {last.name}" if last else "unknown"
                 logger.error(f"Mining round failed — {type(exc).__name__}: {exc}  [at {location}]")
 
     except KeyboardInterrupt:
