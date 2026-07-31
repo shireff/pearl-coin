@@ -65,7 +65,7 @@ class StratumClient:
                 port = 3333
 
             self._sock = socket.create_connection((host, port), timeout=10)
-            self._sock.settimeout(None)
+            self._sock.settimeout(0.1)  # 100ms timeout — releases GIL between recvs
             self._connected = True
             self._stop_event.clear()
 
@@ -167,6 +167,7 @@ class StratumClient:
         return response_data[0]
 
     def _read_loop(self) -> None:
+        import socket as _socket
         buffer = ""
         while not self._stop_event.is_set() and self._connected:
             try:
@@ -184,6 +185,9 @@ class StratumClient:
                     if not line:
                         continue
                     self._handle_message(line)
+            except _socket.timeout:
+                # Normal — timeout releases GIL so mining thread can run
+                continue
             except Exception as e:
                 if not self._stop_event.is_set():
                     self._logger.error(f"Error reading from pool: {e}")
@@ -264,7 +268,9 @@ class StratumClient:
             )
 
             if self.on_job:
-                self.on_job(job)
+                # Run callback in separate thread so _read_loop is not blocked
+                _t = threading.Thread(target=self.on_job, args=(job,), daemon=True)
+                _t.start()
         except Exception as e:
             self._logger.error(f"Failed to parse mining.notify: {e}")
 
