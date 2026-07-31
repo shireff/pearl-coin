@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 _local_root = Path(__file__).resolve().parent
-_local_pearl_gemm_src = str(_local_root.parent / "pearl-gemm" / "src")
+_local_pearl_gemm_src = str(_local_root / "pearl-gemm" / "src")
 if _local_pearl_gemm_src not in sys.path:
     sys.path.insert(0, _local_pearl_gemm_src)
 
