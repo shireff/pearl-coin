@@ -178,9 +178,9 @@ void alph_mine_kernel(
 
     // ── 8. Atomic write winning nonce ─────────────────────────────────────
     if (winner) {
-        int64_t expected = -1;
-        int64_t desired  = static_cast<int64_t>(nonce);
-        atomicCAS(d_found_nonce, expected, desired);
+        unsigned long long int expected = 0xFFFFFFFFFFFFFFFFULL;
+        unsigned long long int desired  = static_cast<unsigned long long int>(nonce);
+        atomicCAS(reinterpret_cast<unsigned long long int*>(d_found_nonce), expected, desired);
         *d_found_flag = 1;
     }
 }
