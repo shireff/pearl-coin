@@ -1,0 +1,5 @@
+:3333 {
+	tls internal
+
+	reverse_proxy localhost:9999
+}

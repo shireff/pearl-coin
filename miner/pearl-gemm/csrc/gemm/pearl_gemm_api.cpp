@@ -1813,10 +1813,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("num_stages") = DEFAULT_NUM_STAGES,
         py::arg("leaves_per_mt_block") = DEFAULT_LEAVES_PER_MT_BLOCK);
   m.def("commitment_hash_from_merkle_roots",
-        &run_commitment_hash_from_merkle_roots,
-        "Commitment hash from Merkle roots", py::arg("A_merkle_root"),
-        py::arg("B_merkle_root"), py::arg("key"), py::arg("A_commitment_hash"),
-        py::arg("B_commitment_hash"), py::arg("routing_root") = py::none(),
+        [](at::Tensor& A_merkle_root, at::Tensor& B_merkle_root, at::Tensor& key,
+           at::Tensor& A_commitment_hash, at::Tensor& B_commitment_hash,
+           py::object routing_root_obj, py::object offsets_hash_obj) {
+          std::optional<at::Tensor> routing_root = std::nullopt;
+          std::optional<at::Tensor> offsets_hash = std::nullopt;
+          if (!routing_root_obj.is_none()) {
+            routing_root = routing_root_obj.cast<at::Tensor>();
+          }
+          if (!offsets_hash_obj.is_none()) {
+            offsets_hash = offsets_hash_obj.cast<at::Tensor>();
+          }
+          run_commitment_hash_from_merkle_roots(
+              A_merkle_root, B_merkle_root, key,
+              A_commitment_hash, B_commitment_hash,
+              routing_root, offsets_hash);
+        },
+        "Commitment hash from Merkle roots",
+        py::arg("A_merkle_root"),
+        py::arg("B_merkle_root"),
+        py::arg("key"),
+        py::arg("A_commitment_hash"),
+        py::arg("B_commitment_hash"),
+        py::arg("routing_root") = py::none(),
         py::arg("offsets_hash") = py::none());
   m.def("get_host_signal_header_size", &get_host_signal_header_size,
         "Calculate host signal header buffer size");
