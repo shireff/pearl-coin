@@ -120,8 +120,10 @@ void alph_mine_kernel(
     r[74] = __byte_perm(n1, 0, 0x0123);
 
     // word75: upper 16 bits = n2 big-endian, lower 16 bits = 0x0000
-    // bytes [300:302] = n2 big-endian, bytes [302:304] = padding zeros
-    r[75] = (static_cast<uint32_t>(__byte_perm(n2, 0, 0x0001)));
+    // bytes [300:302] = n2 big-endian, bytes [302:304] = padding zeros (must be zero)
+    // Without the mask, __byte_perm would duplicate n2's low byte into bits[15:0],
+    // corrupting bytes 302-303 and producing wrong Blake3 hash output.
+    r[75] = static_cast<uint32_t>(__byte_perm(n2, 0, 0x0001)) & 0x0000FFFFu;
 
     // ── 6. Multi-block Blake3 in registers ───────────────────────────────
     uint32_t cv[8] = {
