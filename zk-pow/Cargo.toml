@@ -7,6 +7,14 @@ edition = "2024"
 name = "zk_pow"
 crate-type = ["rlib"]
 
+[[bin]]
+name = "build_cache"
+path = "src/bin/build_cache.rs"
+
+[[bin]]
+name = "prove_verify"
+path = "src/bin/prove_verify.rs"
+
 [features]
 embedded_cache = [] # embedded verifier cache
 pyo3 = ["dep:pyo3", "pearl-blake3/pyo3"] # Python bindings support
