@@ -203,6 +203,7 @@ __device__ __forceinline__ void blake3_compress_msg_block_u32(
   BLAKE3_ROUND_INLINE(state, block);
   BLAKE3_PERMUTE_INLINE(block);
   BLAKE3_ROUND_INLINE(state, block);
+  BLAKE3_PERMUTE_INLINE(block);
   BLAKE3_ROUND_INLINE(state, block);
 
   chaining_value[0] = state[0] ^ state[8];
