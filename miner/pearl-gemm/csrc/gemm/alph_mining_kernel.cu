@@ -28,12 +28,12 @@ static constexpr int PADDED_BLOCKS = 5;       // ceil(302/64) = 5 Blake3 blocks
 static constexpr int PADDED_BYTES  = PADDED_BLOCKS * 64;   // 320 bytes
 static constexpr int PADDED_WORDS  = PADDED_BYTES / 4;     // 80 uint32 words
 
-// Nonce field: bytes [278:302] = 24 bytes = 6 uint32 words in the padded buffer.
+// Nonce field: bytes [278:302] = 24 bytes.
 // Encoded as big-endian: first 16 bytes are 0x00, last 8 bytes are the nonce uint64.
 // Padded buffer word index for nonce start: 278/4 = 69 (with 2-byte offset inside word 69).
-// For simplicity, we store nonce as full uint32[6] at register indices 69..74.
-static constexpr int NONCE_WORD_START = 69;   // word index in padded buffer where nonce begins
-static constexpr int NONCE_UINT64_WORD = 72;  // word index of the uint64 nonce value (last 8 bytes of 24)
+// Nonce uint64 spans bytes [294:302]: words 73 (partial), 74 (full), 75 (partial).
+static constexpr int NONCE_WORD_START = 69;   // word index in padded buffer where nonce field begins
+static constexpr int NONCE_UINT64_WORD = 73;  // word index where nonce uint64 big-endian data starts
 
 __global__
 __launch_bounds__(256, 4)   // 4 blocks/SM → maximize occupancy
@@ -75,36 +75,53 @@ void alph_mine_kernel(
     // ── 5. Inject nonce into register blob ───────────────────────────────
     // Alephium nonce field = bytes [278:302] = 24 bytes.
     // Encoding: 16 zero bytes followed by nonce as big-endian uint64.
-    // In little-endian uint32 register layout:
-    //   blob[278..281] = word index 69, byte offset 2
-    //   We need to overwrite words 69..74 with:
-    //     [278:282] = 0x00000000 (partial zero — preserve bytes 278,279 offset)
+    // See file-level comment and the detailed layout comment below for
+    // the exact word-by-word nonce encoding.
+
+    // Nonce field = bytes [278:302] = 24 bytes:
+    //   bytes [278:294] = zeros (16-byte prefix)
+    //   bytes [294:302] = nonce as big-endian uint64
     //
-    // Because 278 is not aligned to 4, we handle the two boundary words carefully.
-    // Word 69 covers bytes 276-279. We preserve bytes 276-277, zero bytes 278-279.
-    // Word 70 covers bytes 280-283 → 0x00000000
-    // Word 71 covers bytes 284-287 → 0x00000000
-    // Word 72 covers bytes 288-291 → 0x00000000
-    // Word 73 covers bytes 292-295 → nonce bits [63:32] big-endian
-    // Word 74 covers bytes 296-299 → nonce bits [31:0] big-endian
-    // Word 75 covers bytes 300-303 (padded) → zeros (padding, already zero)
-    //
-    // Big-endian uint32 words from big-endian uint64 nonce:
-    //   word73 = nonce >> 32 (as big-endian: byte swap)
-    //   word74 = nonce & 0xFFFFFFFF (as big-endian: byte swap)
+    // Memory layout (little-endian uint32 words):
+    //   word 69 = bytes [276:280]: preserve [276:278], zero [278:280]
+    //   word 70 = bytes [280:284]: zero
+    //   word 71 = bytes [284:288]: zero
+    //   word 72 = bytes [288:292]: zero
+    //   word 73 = bytes [292:296]: [292:294]=zero, [294:296]=nonce_be[0:2]
+    //   word 74 = bytes [296:300]: nonce_be[2:6]
+    //   word 75 = bytes [300:304]: [300:302]=nonce_be[6:8], [302:304]=padding zeros
 
     // Preserve lower 2 bytes of word 69 (bytes 276,277), zero upper 2 (bytes 278,279)
-    r[69] = r[69] & 0x0000FFFFu;  // zero bytes 278,279 (stored in upper 16 bits LE)
+    r[69] = r[69] & 0x0000FFFFu;
     r[70] = 0u;
     r[71] = 0u;
     r[72] = 0u;
 
-    // Nonce as big-endian uint32 words
-    uint32_t nonce_hi = static_cast<uint32_t>(nonce >> 32);
-    uint32_t nonce_lo = static_cast<uint32_t>(nonce & 0xFFFFFFFF);
-    // Byte-swap for big-endian storage in little-endian register word
-    r[73] = __byte_perm(nonce_hi, 0, 0x0123);  // byte-swap nonce_hi
-    r[74] = __byte_perm(nonce_lo, 0, 0x0123);  // byte-swap nonce_lo
+    // Nonce uint64 as big-endian bytes:
+    //   nonce_be[0] = (nonce >> 56) & 0xFF
+    //   nonce_be[7] = nonce & 0xFF
+    // Split into three uint32 words covering bytes 292-304:
+    //   word73[31:16] = 0x0000  (bytes 292-293 = zero)
+    //   word73[15:0]  = nonce_be[0:2] = nonce >> 48 as big-endian 16-bit
+    //   word74[31:0]  = nonce_be[2:6] = nonce[47:16] as big-endian 32-bit
+    //   word75[31:16] = nonce_be[6:8] = nonce[15:0] as big-endian 16-bit
+    //   word75[15:0]  = 0x0000  (bytes 302-303 = padding)
+
+    uint16_t n0 = static_cast<uint16_t>((nonce >> 48) & 0xFFFF);
+    uint32_t n1 = static_cast<uint32_t>((nonce >> 16) & 0xFFFFFFFF);
+    uint16_t n2 = static_cast<uint16_t>(nonce & 0xFFFF);
+
+    // word73: upper 16 bits = 0x0000, lower 16 bits = n0 big-endian
+    // In LE uint32: byte 292=0, byte293=0, byte294=n0_hi, byte295=n0_lo
+    r[73] = (static_cast<uint32_t>(__byte_perm(n0, 0, 0x0001)) << 16);
+
+    // word74: n1 as big-endian uint32
+    // bytes [296:300] = n1 in big-endian
+    r[74] = __byte_perm(n1, 0, 0x0123);
+
+    // word75: upper 16 bits = n2 big-endian, lower 16 bits = 0x0000
+    // bytes [300:302] = n2 big-endian, bytes [302:304] = padding zeros
+    r[75] = (static_cast<uint32_t>(__byte_perm(n2, 0, 0x0001)));
 
     // ── 6. Multi-block Blake3 in registers ───────────────────────────────
     uint32_t cv[8] = {
