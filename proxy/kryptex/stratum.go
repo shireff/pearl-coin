@@ -221,31 +221,15 @@ func (c *stratumClient) buildBlockFromSubmission(submit submitRequest) (string, 
 		return "", fmt.Errorf("failed to get block template: %w", err)
 	}
 
-	coinbaseTx, ok := template["coinbasevalue"].(string)
-	if !ok {
-		coinbaseTx = "0x00"
-	}
-
-	prevHash, ok := template["previousblockhash"].(string)
-	if !ok {
-		prevHash = ""
-	}
+	_ = template["coinbasevalue"]
+	_ = template["previousblockhash"]
 
 	height := int64(0)
 	if h, ok := template["height"].(float64); ok {
 		height = int64(h)
 	}
 
-	targetDiff := template["bits"].(string)
-
-	blockBlob := fmt.Sprintf(
-		"%s%s%s%s%s",
-		prevHash,
-		coinbaseTx,
-		submit.Nonce,
-		submit.Result,
-		strconv.FormatInt(height, 10),
-	)
+	_ = template["bits"].(string)
 
 	blockHeader := c.constructBlockHeader(template, submit, height)
 	return blockHeader, nil
@@ -274,9 +258,10 @@ func (c *stratumClient) constructBlockHeader(template map[string]interface{}, su
 		bits = b
 	}
 
+	var nonceUint uint32
 	nonceHex := submit.Nonce
-	if n, err := strconv.ParseUint(nonceHex, 16, 32); err == nil {
-		nonceHex = fmt.Sprintf("%08x", uint32(n))
+	if parsed, err := strconv.ParseUint(nonceHex, 16, 32); err == nil {
+		nonceUint = uint32(parsed)
 	}
 
 	header := fmt.Sprintf(
@@ -286,7 +271,7 @@ func (c *stratumClient) constructBlockHeader(template map[string]interface{}, su
 		decodeHex(merkleRoot),
 		timeStamp,
 		decodeHex(bits),
-		uint32(n),
+		nonceUint,
 	)
 
 	return header
@@ -373,7 +358,7 @@ func (c *stratumClient) buildBlob(template map[string]interface{}) string {
 }
 
 func (c *stratumClient) difficultyToTarget(difficulty int) string {
-	target := new(big.Int).Lsh(big.NewInt(1), 256-int32(difficulty))
+	target := new(big.Int).Lsh(big.NewInt(1), uint(256-difficulty))
 	target.Sub(target, big.NewInt(1))
 	return fmt.Sprintf("%064x", target)
 }
