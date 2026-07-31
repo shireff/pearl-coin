@@ -461,16 +461,10 @@ class AlephiumMiningSession:
         self._last_nonce: int = -1
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
-        # Reset nonce counter only when the block height changes (real new block).
-        # Alephium pools send a new job_id every ~1s even for the same height,
-        # so resetting on job_id would keep scanning nonce=0 forever.
-        job_height = getattr(job, "height", None)
-        job_id = getattr(job, "job_id", "")
-        height_changed = not hasattr(self, "_last_height") or self._last_height != job_height
-        if height_changed:
-            self._base_nonce = 0
-            self._last_height = job_height
-        self._last_job_id = job_id
+        # Alephium has 16 chains — height changes every job from a different chain.
+        # Never reset _base_nonce on height change: it advances continuously.
+        # The nonce space is 2^64 so wraparound is not a concern.
+        self._last_job_id = getattr(job, "job_id", "")
 
         # Copy 302 bytes into first 302 slots, last 18 remain zero (padding)
         blob_tensor = torch.frombuffer(bytes(job.blob), dtype=torch.uint8)
