@@ -135,7 +135,9 @@ void alph_mine_kernel(
             flags = 0u;  // middle block: no special flags
         }
 
-        blake3_compress_msg_block_u32(msg, cv, block, block_len, flags);
+        // counter = 0: 302 bytes fits in a single Blake3 chunk (< 1024 bytes)
+        // The chunk counter is always 0; only multi-chunk inputs would use counter > 0.
+        blake3_compress_msg_block_u32(msg, cv, 0, block_len, flags);
     }
 
     // ── 7. Big-endian target comparison ──────────────────────────────────
