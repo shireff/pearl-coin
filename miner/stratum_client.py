@@ -168,6 +168,7 @@ class StratumClient:
 
     def _read_loop(self) -> None:
         buffer = ""
+        self._logger.info("_read_loop started")
         while not self._stop_event.is_set() and self._connected:
             try:
                 data = self._sock.recv(4096)
@@ -177,6 +178,7 @@ class StratumClient:
                     break
 
                 buffer += data.decode("utf-8", errors="replace")
+                self._logger.info(f"Received {len(data)} bytes")
 
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
