@@ -104,7 +104,10 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            params = [self.username, job_id, nonce]
+            # Official Alephium Stratum spec: [jobId, nonce, workerId?]
+            # workerId is optional — omit if not available
+            worker_id = getattr(self, "_worker_id", "") or ""
+            params = [job_id, nonce, worker_id] if worker_id else [job_id, nonce]
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
@@ -143,6 +146,12 @@ class StratumClient:
             self._logger.error(f"Failed to authorize with pool: {self.username}")
             return False
 
+        # Capture workerId if pool returns it (optional per Alephium spec)
+        auth_result = authorize_response.get("result")
+        if isinstance(auth_result, str) and auth_result:
+            self._worker_id = auth_result
+        else:
+            self._worker_id = ""
         self._authorized = True
         return True
 

@@ -443,13 +443,13 @@ class AlephiumMiningSession:
     Optimizations:
     - Blob pre-allocated as 320 bytes (zero-padded) — avoids per-round allocation
     - Target pre-allocated and updated in-place
-    - nonces_per_round = 2^20 covers 1M nonces per kernel launch (~1ms on RTX 4060)
+    - nonces_per_round = 2^22 covers 4M nonces per kernel launch (~4ms on RTX 4060)
     - Nonce counter increments across rounds — no duplicate nonce retries
     """
 
     BLOB_PADDED_LEN = 320  # 302 bytes + 18 zero bytes padding to 5×64
 
-    def __init__(self, nonces_per_round: int = 1 << 20):
+    def __init__(self, nonces_per_round: int = 1 << 22):
         self.nonces_per_round = nonces_per_round
         self._base_nonce: int = 0
         # Pre-allocate zero-padded blob (320 bytes) — last 18 bytes stay zero
