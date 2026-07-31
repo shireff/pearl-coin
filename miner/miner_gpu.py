@@ -560,25 +560,6 @@ def main():
         prefetch_thread.start()
         logger.info("Job prefetch thread started")
 
-        # ── GPU keep-alive: prevents P8 power state between pool rounds ──
-        # Runs a zero-work CUDA op every 10ms to keep GPU clocks at P0.
-        _keepalive_stop = threading.Event()
-
-        def _gpu_keepalive():
-            # Use a small matmul to actually wake the GPU and keep it at P0.
-            # torch.zeros(1).add_(0) is too lightweight — GPU ignores it.
-            _a = torch.ones(32, 32, device="cuda", dtype=torch.float16)
-            _b = torch.ones(32, 32, device="cuda", dtype=torch.float16)
-            while not _keepalive_stop.is_set():
-                torch.mm(_a, _b)
-                torch.cuda.synchronize()
-                time.sleep(0.005)
-
-        if pool_mode:
-            _keepalive_thread = threading.Thread(target=_gpu_keepalive, daemon=True)
-            _keepalive_thread.start()
-            logger.info("GPU keep-alive thread started (pool mode)")
-
         round_count = 0
         total_elapsed = 0.0
 
@@ -604,6 +585,10 @@ def main():
 
                 logger.info(f"GPU round time: {elapsed*1000:.1f}ms, tmok/s={tmok_per_s:.2f}  jobs={session.num_jobs}  combos={session.P*session.Q}")
 
+                # In pool mode, immediately run the next round without waiting
+                # for a new job — keeps GPU at P0 and maximizes tmok/s.
+                # Only check for a new job between rounds (non-blocking).
+
                 if won:
                     if pool_mode:
                         ok, nonce_hex, result_hex = session.get_last_result()
@@ -622,8 +607,6 @@ def main():
                 logger.warning("Job queue empty — waiting for jobs...")
             except KeyboardInterrupt:
                 _stop_prefetch.set()
-                if pool_mode:
-                    _keepalive_stop.set()
                 raise
             except Exception as exc:
                 import traceback as _tb
