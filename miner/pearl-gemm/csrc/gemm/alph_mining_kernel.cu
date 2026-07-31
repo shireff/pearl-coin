@@ -161,17 +161,17 @@ void alph_mine_kernel(
     // cv[0..7] is little-endian hash output from Blake3.
     // Alephium target comparison is big-endian, so we byte-swap cv words
     // and compare against s_target[] (which was loaded byte-swapped from uint8 input).
+    // Big-endian comparison: hash <= target word by word.
+    // Unrolling is intentionally avoided — early exit is required for correctness.
     bool winner = false;
     {
-        bool decided = false;
-        #pragma unroll
-        for (int i = 0; i < 8 && !decided; i++) {
-            // Both s_target[i] and hash_be are in big-endian word order
+        winner = true;  // assume winner until a word proves otherwise
+        for (int i = 0; i < 8; i++) {
             uint32_t hash_be = __byte_perm(cv[i], 0, 0x0123);
-            if (hash_be < s_target[i]) { winner = true;  decided = true; }
-            else if (hash_be > s_target[i]) { winner = false; decided = true; }
+            if (hash_be < s_target[i]) { break; }             // hash < target → winner
+            if (hash_be > s_target[i]) { winner = false; break; } // hash > target → loser
+            // equal → continue to next word
         }
-        if (!decided) winner = true;  // exactly equal → valid share
     }
 
     // ── 8. Atomic write winning nonce ─────────────────────────────────────
