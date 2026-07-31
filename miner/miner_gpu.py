@@ -459,6 +459,7 @@ class AlephiumMiningSession:
         self._t_end = torch.cuda.Event(enable_timing=True)
         self._last_found: bool = False
         self._last_nonce: int = -1
+        self._last_blob_prefix: bytes = b"\x00" * 16
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
         # Alephium has 16 chains — height changes every job from a different chain.
@@ -467,8 +468,14 @@ class AlephiumMiningSession:
         self._last_job_id = getattr(job, "job_id", "")
 
         # Copy 302 bytes into first 302 slots, last 18 remain zero (padding)
-        blob_tensor = torch.frombuffer(bytes(job.blob), dtype=torch.uint8)
+        blob_bytes = bytes(job.blob)
+        blob_tensor = torch.frombuffer(blob_bytes, dtype=torch.uint8)
         self._blob_gpu[:302].copy_(blob_tensor)
+
+        # Capture the real 16-byte pool header prefix (bytes [278:294]).
+        # This must be sent as the nonce prefix — NOT zeros — so the pool
+        # recomputes the same hash the kernel computed.
+        self._last_blob_prefix = blob_bytes[278:294] if len(blob_bytes) >= 294 else b"\x00" * 16
 
         # Target as big-endian uint8[32]
         target_bytes = job.target.to_bytes(32, "big")
@@ -508,8 +515,9 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Nonce as 24-byte big-endian hex (16 zero bytes + 8-byte uint64)
-        nonce_hex = self._last_nonce.to_bytes(8, "big").rjust(24, b"\x00").hex()
+        # Nonce as 24-byte hex: real pool prefix (bytes [278:294]) + 8-byte nonce uint64.
+        # Using zero padding here causes the pool to compute a different hash → rejected.
+        nonce_hex = (self._last_blob_prefix + self._last_nonce.to_bytes(8, "big")).hex()
         return True, nonce_hex, ""
 
     def close(self) -> None:
