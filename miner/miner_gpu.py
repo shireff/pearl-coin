@@ -503,16 +503,20 @@ class AlephiumMiningSession:
         self._target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
 
         self._t_start.record()
+        # Pass base_nonce as signed int64 (C++ casts to uint64 internally)
+        _base_nonce_signed = self._base_nonce if self._base_nonce < (1 << 63) else self._base_nonce - (1 << 64)
         found, nonce = alph_mine_batch(
             self._blob_gpu,
-            self._base_nonce,
+            _base_nonce_signed,
             self.nonces_per_round,
             self._target_gpu,
         )
         self._t_end.record()
         self._base_nonce += self.nonces_per_round
         self._last_found = bool(found)
-        self._last_nonce = int(nonce)
+        # Convert from C++ int64_t to unsigned Python int to handle nonces >= 2^63
+        _raw_nonce = int(nonce)
+        self._last_nonce = _raw_nonce & 0xFFFFFFFFFFFFFFFF if _raw_nonce < 0 else _raw_nonce
 
         # Diagnostic: log every 1000 rounds to confirm shares are being found
         if not hasattr(self, "_round_count"):
