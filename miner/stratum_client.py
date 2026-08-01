@@ -269,6 +269,8 @@ class StratumClient:
             self._handle_set_difficulty(params)
         elif method == "mining.set_extranonce":
             self._handle_set_extranonce(params)
+        elif method == "mining.set_target":
+            self._handle_set_target(params)
         else:
             self._logger.debug(f"Unhandled notification: {method}")
 
@@ -346,6 +348,18 @@ class StratumClient:
             self._logger.info(f"Pool set extranonce: {extranonce}")
         except Exception as e:
             self._logger.error(f"Failed to parse set_extranonce: {e}")
+
+    def _handle_set_target(self, params) -> None:
+        """Handle mining.set_target — pool sets an easier target for share submission."""
+        try:
+            target_hex = str(params[0]) if isinstance(params, list) and len(params) > 0 else str(params)
+            target_val = int(target_hex, 16)
+            with self._lock:
+                if self._current_job:
+                    self._current_job.target = target_val
+            self._logger.info(f"Pool set target: {target_hex} ({target_val:#x})")
+        except Exception as e:
+            self._logger.error(f"Failed to parse set_target: {e}")
 
     def _handle_response(self, message: dict) -> None:
         request_id = message.get("id")
