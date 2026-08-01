@@ -94,3 +94,25 @@ rm -rf build src/pearl_gemm_cuda*.so
 python setup.py build_ext --inplace
 cd ~/pearl-cion
 find . -name "pearl_gemm_cuda*.so"
+
+
+
+
+# ── ALEPHIUM POOL MINING (Kryptex) ───────────────────────────────────
+
+# Session restart + run (after SSH reconnect):
+source /workspace/pearl-venv/bin/activate
+cd ~/pearl-cion && git pull
+
+# Start miner in background
+python miner/miner_gpu.py \
+  --pool-url stratum+tcp://alph.kryptex.network:7010 \
+  --pool-username 3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker \
+  --pool-password x \
+  --noise-range 256 --P 8 --Q 8 \
+  > /tmp/miner_live.log 2>&1 & echo "Miner PID: $!"
+
+# Monitor important events only
+tail -f /tmp/miner_live.log | strings | grep -E "SHARE|ACCEPT|REJECT|WINNER|submit sent|ERROR|WARNING|Connected"
+
+# Stats: https://pool.kryptex.com/alph#3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker

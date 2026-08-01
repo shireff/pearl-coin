@@ -262,11 +262,12 @@ source /workspace/pearl-venv/bin/activate
 
 python miner/miner_gpu.py \
   --pool-url stratum+tcp://alph.kryptex.network:7010 \
-  --pool-username krxYM43GWD.worker \
+  --pool-username 3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker \
   --pool-password x \
-  --pool-worker worker \
   --noise-range 256 --P 8 --Q 8
 ```
+
+> Stats and balance: https://pool.kryptex.com/alph#3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker
 
 ### Persistently with log
 
@@ -278,9 +279,8 @@ source /workspace/pearl-venv/bin/activate
 
 python miner/miner_gpu.py \
   --pool-url stratum+tcp://alph.kryptex.network:7010 \
-  --pool-username krxYM43GWD.worker \
+  --pool-username 3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker \
   --pool-password x \
-  --pool-worker worker \
   --noise-range 256 --P 8 --Q 8 \
   2>&1 | tee /tmp/miner.log
 ```
