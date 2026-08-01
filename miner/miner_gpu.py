@@ -452,6 +452,7 @@ class AlephiumMiningSession:
     def __init__(self, nonces_per_round: int = 1 << 22):
         self.nonces_per_round = nonces_per_round
         self._base_nonce: int = 0
+        self._nonce_initialized: bool = False  # set to True after first extranonce-based init
         # Pre-allocate zero-padded blob (320 bytes) — last 18 bytes stay zero
         self._blob_gpu = torch.zeros(self.BLOB_PADDED_LEN, dtype=torch.uint8, device="cuda")
         self._target_gpu = torch.empty(32, dtype=torch.uint8, device="cuda")
@@ -460,6 +461,8 @@ class AlephiumMiningSession:
         self._last_found: bool = False
         self._last_nonce: int = -1
         self._last_blob_prefix: bytes = b"\x00" * 16
+        self._last_blob_bytes: bytes = b"\x00" * 302
+        self._last_target_bytes: bytes = b"\xff" * 32
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
         # Alephium has 16 chains — height changes every job from a different chain.
@@ -476,9 +479,27 @@ class AlephiumMiningSession:
         # This must be sent as the nonce prefix — NOT zeros — so the pool
         # recomputes the same hash the kernel computed.
         self._last_blob_prefix = blob_bytes[278:294] if len(blob_bytes) >= 294 else b"\x00" * 16
+        self._last_blob_bytes = blob_bytes  # for hash verification in get_last_result
+
+        # Initialize _base_nonce from the extranonce on the very first job.
+        # The pool embeds its 2-byte extranonce at blob[278:280].
+        # The pool only accepts nonces where bytes [294:295] = extranonce.
+        # Since the kernel writes nonce as big-endian uint64 at bytes [294:302],
+        # bytes [294:295] = (nonce >> 48) & 0xFFFF.
+        # So we start base_nonce = extranonce_value << 48.
+        if not self._nonce_initialized and len(blob_bytes) >= 280:
+            extranonce_bytes = blob_bytes[278:280]
+            extranonce_val = int.from_bytes(extranonce_bytes, "big")
+            self._base_nonce = extranonce_val << 48
+            self._nonce_initialized = True
+            import logging as _log
+            _log.getLogger("miner_gpu").info(
+                f"[Alephium] extranonce={extranonce_bytes.hex()} → base_nonce={self._base_nonce:#018x}"
+            )
 
         # Target as big-endian uint8[32]
         target_bytes = job.target.to_bytes(32, "big")
+        self._last_target_bytes = target_bytes  # for hash verification in get_last_result
         self._target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
 
         self._t_start.record()
@@ -515,9 +536,26 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Per official Alephium Stratum spec: nonceSansExtraNonce = 8 bytes only.
-        # The pool prepends its own 16-byte extra-nonce when verifying — do NOT send it.
-        nonce_hex = self._last_nonce.to_bytes(8, "big").hex()
+        nonce_bytes = self._last_nonce.to_bytes(8, "big")
+        nonce_hex = nonce_bytes.hex()
+
+        # Verify the hash using Python blake3 before submitting.
+        # This catches any kernel hash computation errors early.
+        try:
+            import blake3 as _b3
+            b = bytearray(self._last_blob_bytes)
+            b[294:302] = nonce_bytes
+            h = _b3.blake3(bytes(b)).digest()
+            target = self._last_target_bytes
+            if h > target:
+                import logging as _log
+                _log.getLogger("miner_gpu").warning(
+                    f"GPU hash INVALID: {h.hex()} > target {target.hex()} — skipping"
+                )
+                return False, "", ""
+        except Exception:
+            pass  # if blake3 not available, trust the GPU result
+
         return True, nonce_hex, ""
 
     def close(self) -> None:

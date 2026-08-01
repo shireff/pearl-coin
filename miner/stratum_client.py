@@ -267,6 +267,8 @@ class StratumClient:
             self._handle_mining_notify(params)
         elif method == "mining.set_difficulty":
             self._handle_set_difficulty(params)
+        elif method == "mining.set_extranonce":
+            self._handle_set_extranonce(params)
         else:
             self._logger.debug(f"Unhandled notification: {method}")
 
@@ -333,6 +335,17 @@ class StratumClient:
                 self._logger.info(f"Pool set difficulty: {difficulty}")
         except Exception as e:
             self._logger.error(f"Failed to parse set_difficulty: {e}")
+
+    def _handle_set_extranonce(self, params) -> None:
+        try:
+            if isinstance(params, list) and len(params) > 0:
+                extranonce = str(params[0])
+            else:
+                extranonce = str(params)
+            self._extranonce1 = extranonce
+            self._logger.info(f"Pool set extranonce: {extranonce}")
+        except Exception as e:
+            self._logger.error(f"Failed to parse set_extranonce: {e}")
 
     def _handle_response(self, message: dict) -> None:
         request_id = message.get("id")
