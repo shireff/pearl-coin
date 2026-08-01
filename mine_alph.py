@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+import blake3
+
 _local_root = Path(__file__).resolve().parent.parent / "miner"
 if str(_local_root) not in sys.path:
     sys.path.insert(0, str(_local_root))
@@ -115,13 +117,27 @@ def main():
                 )
 
                 if found and nonce >= 0:
-                    nonce_hex = nonce.to_bytes(8, "big").hex()
-                    logger.info(f"SHARE FOUND: nonce={nonce_hex}")
-                    success = client.submit_plain_proof(nonce_hex, "", current_job.job_id)
-                    if success:
-                        logger.info("Share ACCEPTED!")
+                    # The kernel varies bytes [294:302] only, preserving [278:294] from pool.
+                    # Reconstruct the full 8-byte nonce that was written to the blob:
+                    # base_nonce + winning_tid = nonce (absolute), but bytes [294:302]
+                    # in the blob after kernel = nonce written as big-endian 8 bytes.
+                    nonce_bytes = nonce.to_bytes(8, "big")
+                    nonce_hex = nonce_bytes.hex()
+                    # Verify the hash matches before submitting
+                    b = bytearray(blob_bytes)
+                    b[294:302] = nonce_bytes
+                    h = blake3.blake3(bytes(b)).digest()
+                    target_val = current_job.target.to_bytes(32, "big")
+                    valid = h <= target_val
+                    logger.info(f"SHARE FOUND: nonce={nonce_hex} hash={h.hex()[:16]}... valid={valid}")
+                    if valid:
+                        success = client.submit_plain_proof(nonce_hex, "", current_job.job_id)
+                        if success:
+                            logger.info("Share submitted (fire-and-forget)")
+                        else:
+                            logger.warning("Share submit failed")
                     else:
-                        logger.warning("Share REJECTED")
+                        logger.warning(f"Share hash INVALID — skipping submit. hash={h.hex()} target={target_val.hex()}")
 
             except queue.Empty:
                 logger.warning("Job queue empty — waiting...")
