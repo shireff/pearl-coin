@@ -108,6 +108,12 @@ class StratumClient:
             # workerId is optional — omit if not available
             worker_id = getattr(self, "_worker_id", "") or ""
             params = [job_id, nonce, worker_id] if worker_id else [job_id, nonce]
+            # Kryptex Alephium pool uses fire-and-forget: no response is sent back.
+            # Treat successful send as accepted — pool will show stats in dashboard.
+            sent = self._send_fire_and_forget("mining.submit", params)
+            if sent:
+                self._logger.info(f"Pool submit sent (fire-and-forget): job={job_id} nonce={nonce[:16]}...")
+            return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
@@ -154,6 +160,26 @@ class StratumClient:
             self._worker_id = ""
         self._authorized = True
         return True
+
+    def _send_fire_and_forget(self, method: str, params: list) -> bool:
+        """Send a request without waiting for a response (fire-and-forget).
+
+        Used for Alephium mining.submit where Kryptex pool never sends
+        a response back with a matching id.
+        """
+        if not self._sock:
+            return False
+        self._job_id_counter += 1
+        request_id = self._job_id_counter
+        request = {"id": request_id, "method": method, "params": params}
+        try:
+            payload = json.dumps(request) + "\n"
+            self._logger.info(f"[STRATUM SEND] {payload.strip()}")
+            self._sock.sendall(payload.encode("utf-8"))
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to send {method}: {e}")
+            return False
 
     def _send_request(
         self, method: str, params: list, timeout: float = 10.0
