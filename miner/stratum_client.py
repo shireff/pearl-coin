@@ -44,11 +44,13 @@ class StratumClient:
         self._subscribed = False
         self._authorized = False
         self._current_job: Optional[StratumJob] = None
+        self._worker_id = ""
+        self._extranonce1 = ""
         # Pool share target — set only via set_target or set_difficulty.
         # When None, targetBlob from mining.notify is used directly as share target.
         # Kryptex Alephium sends the actual pool share target in targetBlob.
         # Default difficulty=512 (Kryptex Alephium default) — updated by set_difficulty
-        self._share_target: Optional[int] = int((2**256 - 1) // 512) if algorithm == "alephium" else None
+        self._share_target: Optional[int] = None
         self._difficulty_received = threading.Event()
         self._job_id_counter = 0
         self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
@@ -148,8 +150,8 @@ class StratumClient:
         elif isinstance(result, str) and result:
             # Kryptex Alephium: subscribe result is the session/worker id (e.g. "00000000")
             # Store it so submit_share sends [job_id, nonce, worker_id] not [job_id, nonce]
-            self._worker_id = result
-            self._logger.info(f"Pool subscribe returned worker_id: {result}")
+            self._worker_id = str(result).strip()
+            self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
 
         authorize_response = self._send_request(
             "mining.authorize", [self.username, self.password]
@@ -161,7 +163,11 @@ class StratumClient:
         auth_result = authorize_response.get("result")
         if isinstance(auth_result, str) and auth_result:
             # Pool returned a string worker_id from authorize — use it
-            self._worker_id = auth_result
+            self._worker_id = str(auth_result).strip()
+        elif isinstance(auth_result, bool):
+            # Some Kryptex Alephium pools respond with a bare true here.
+            # Preserve any worker/session id already discovered from subscribe.
+            self._worker_id = self._worker_id or ""
         elif not self._worker_id:
             # No worker_id from subscribe or authorize — leave empty
             self._worker_id = ""
