@@ -462,6 +462,10 @@ class AlephiumMiningSession:
         self._t_end = torch.cuda.Event(enable_timing=True)
         self._last_found: bool = False
         self._last_nonce: int = -1
+        # Alephium pool submissions are expected to carry the nonce in the
+        # canonical 24-byte big-endian form. The GPU kernel still searches a
+        # compact uint64 counter, but the emitted share payload must be widened
+        # to the pool-accepted 24-byte width.
         self._last_nonce_bytes: bytes = b"\x00" * 24
         self._last_blob_prefix: bytes = b"\x00" * 16
         self._last_blob_bytes: bytes = b"\x00" * 302
@@ -566,8 +570,8 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Use the actual nonce bytes — the kernel is verified correct, trust it directly.
-        # Python-side hash verification is unreliable due to blob_gpu race condition.
+        # Return the canonical 24-byte nonce hex string so the share payload
+        # matches the pool's expected submit width.
         nonce_bytes = self._last_nonce_bytes
         nonce_hex = nonce_bytes.hex()
         return True, nonce_hex, ""
