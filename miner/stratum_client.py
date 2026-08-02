@@ -159,17 +159,6 @@ class StratumClient:
         else:
             self._worker_id = ""
         self._authorized = True
-
-        if self.algorithm == "alephium":
-            # Wait up to 3s for pool to send set_difficulty notification.
-            # Kryptex sends it asynchronously right after authorize.
-            # _difficulty_received is set by _handle_set_difficulty.
-            self._difficulty_received.wait(timeout=3.0)
-            with self._lock:
-                self._logger.info(
-                    f"share_target after authorize: {self._share_target:#x}"
-                )
-
         return True
 
     def _send_fire_and_forget(self, method: str, params: list) -> bool:
@@ -305,6 +294,12 @@ class StratumClient:
 
             blob = bytes.fromhex(header_blob_hex)
             block_target = int(target_blob_hex, 16)
+
+            # Wait briefly for set_difficulty to arrive before processing first job.
+            # Kryptex sends set_difficulty right after authorize, before the first notify.
+            # A short wait here avoids the pool connection timeout that a longer wait causes.
+            if self.algorithm == "alephium":
+                self._difficulty_received.wait(timeout=0.5)
 
             # Use _share_target if set via set_target/set_difficulty,
             # otherwise use targetBlob directly — Kryptex embeds the pool
