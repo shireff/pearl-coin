@@ -774,9 +774,9 @@ def main():
                             job_id = getattr(mining_job, "job_id", "")
                             success = _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
                             if success:
-                                logger.info(f"Pool share ACCEPTED! job_id={job_id}")
+                                logger.info(f"Pool share submitted: job_id={job_id} nonce={nonce_hex[:16]}...")
                             else:
-                                logger.warning(f"Pool share REJECTED. job_id={job_id} nonce={nonce_hex[:16]}...")
+                                logger.warning(f"Pool share submit failed. job_id={job_id} nonce={nonce_hex[:16]}...")
                         else:
                             logger.warning("Won but could not extract nonce/result for pool")
                     else:

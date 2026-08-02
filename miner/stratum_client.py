@@ -373,3 +373,6 @@ class StratumClient:
             event, data_list = pending
             data_list[0] = message
             event.set()
+        else:
+            # Log unmatched responses — catches pool errors on fire-and-forget submits
+            self._logger.info(f"[Pool response] id={request_id} {message}")
