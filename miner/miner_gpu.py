@@ -462,6 +462,7 @@ class AlephiumMiningSession:
         self._t_end = torch.cuda.Event(enable_timing=True)
         self._last_found: bool = False
         self._last_nonce: int = -1
+        self._last_nonce_bytes: bytes = b"\x00" * 8
         self._last_blob_prefix: bytes = b"\x00" * 16
         self._last_blob_bytes: bytes = b"\x00" * 302
         self._last_target_bytes: bytes = b"\xff" * 32
@@ -519,6 +520,15 @@ class AlephiumMiningSession:
         _raw_nonce = int(nonce)
         self._last_nonce = _raw_nonce & 0xFFFFFFFFFFFFFFFF if _raw_nonce < 0 else _raw_nonce
 
+        # If winner found, read the actual nonce bytes the kernel wrote to blob[294:302].
+        # This avoids int64/uint64 confusion — we use the kernel's actual output directly.
+        if found and self._last_nonce != 0xFFFFFFFFFFFFFFFF:
+            blob_with_nonce = self._blob_gpu[:302].cpu().numpy().tobytes()
+            self._last_blob_bytes = blob_with_nonce  # blob with winning nonce already injected
+            self._last_nonce_bytes = blob_with_nonce[294:302]  # actual nonce bytes from kernel
+        else:
+            self._last_nonce_bytes = self._last_nonce.to_bytes(8, "big")
+
         # Diagnostic: log every 1000 rounds to confirm shares are being found
         if not hasattr(self, "_round_count"):
             self._round_count = 0
@@ -539,16 +549,15 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        nonce_bytes = self._last_nonce.to_bytes(8, "big")
+        # Use the actual nonce bytes the kernel wrote to blob[294:302]
+        nonce_bytes = self._last_nonce_bytes
         nonce_hex = nonce_bytes.hex()
 
         # Verify the hash using Python blake3 before submitting.
-        # This catches any kernel hash computation errors early.
+        # _last_blob_bytes already contains the blob with the winning nonce injected.
         try:
             import blake3 as _b3
-            b = bytearray(self._last_blob_bytes)
-            b[294:302] = nonce_bytes
-            h = _b3.blake3(bytes(b)).digest()
+            h = _b3.blake3(self._last_blob_bytes).digest()
             target = self._last_target_bytes
             if h > target:
                 self._logger.warning(
