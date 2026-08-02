@@ -520,14 +520,18 @@ class AlephiumMiningSession:
         _raw_nonce = int(nonce)
         self._last_nonce = _raw_nonce & 0xFFFFFFFFFFFFFFFF if _raw_nonce < 0 else _raw_nonce
 
-        # If winner found, read the actual nonce bytes the kernel wrote to blob[294:302].
-        # This avoids int64/uint64 confusion — we use the kernel's actual output directly.
+        # If winner found, reconstruct the winning nonce bytes.
+        # The kernel writes nonce = base_nonce_unsigned + tid as big-endian uint64 at bytes [294:302].
+        # We use _last_nonce (already converted to unsigned) to compute those bytes.
+        # We do NOT read from blob_gpu because the prefetch thread may have overwritten it.
         if found and self._last_nonce != 0xFFFFFFFFFFFFFFFF:
-            blob_with_nonce = self._blob_gpu[:302].cpu().numpy().tobytes()
-            self._last_blob_bytes = blob_with_nonce  # blob with winning nonce already injected
-            self._last_nonce_bytes = blob_with_nonce[294:302]  # actual nonce bytes from kernel
-        else:
             self._last_nonce_bytes = self._last_nonce.to_bytes(8, "big")
+            # Reconstruct blob with winning nonce for hash verification
+            winning_blob = bytearray(self._last_blob_bytes)  # blob from job (before nonce injection)
+            winning_blob[294:302] = self._last_nonce_bytes
+            self._last_blob_bytes = bytes(winning_blob)
+        else:
+            self._last_nonce_bytes = b"\x00" * 8
 
         # Diagnostic: log every 1000 rounds to confirm shares are being found
         if not hasattr(self, "_round_count"):
