@@ -7,5 +7,5 @@ name = "pearl-gemm-build-utils"
 version = "0.1.0"
 description = "Build-time utilities and schemas for pearl-gemm"
 requires-python = ">=3.12"
-dependencies = ["pydantic>=2.0.0"]
+dependencies = ["pydantic>=2.13.4"]
 
