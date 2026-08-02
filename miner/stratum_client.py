@@ -326,13 +326,20 @@ class StratumClient:
         try:
             if params and len(params) > 0:
                 difficulty = float(params[0])
-                # Log only — Kryptex embeds the actual share target in targetBlob.
-                # Do not override _share_target from difficulty since targetBlob
-                # is already the correct pool share target.
+                if difficulty > 0:
+                    # Verified: share_target = (2^256-1) / difficulty
+                    # difficulty=512 → 007fffff... → 197 valid per 100k ✓
+                    share_target = int((2**256 - 1) // difficulty)
+                else:
+                    share_target = 2**256 - 1
                 with self._lock:
+                    self._share_target = share_target
                     if self._current_job:
+                        self._current_job.target = share_target
                         self._current_job.difficulty = difficulty
-                self._logger.info(f"Pool set difficulty: {difficulty}")
+                self._logger.info(
+                    f"Pool set difficulty: {difficulty} → share_target={share_target:#x}"
+                )
         except Exception as e:
             self._logger.error(f"Failed to parse set_difficulty: {e}")
 
