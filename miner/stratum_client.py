@@ -47,7 +47,8 @@ class StratumClient:
         # Pool share target — set only via set_target or set_difficulty.
         # When None, targetBlob from mining.notify is used directly as share target.
         # Kryptex Alephium sends the actual pool share target in targetBlob.
-        self._share_target: Optional[int] = None
+        # Default difficulty=512 (Kryptex Alephium default) — updated by set_difficulty
+        self._share_target: Optional[int] = int((2**256 - 1) // 512) if algorithm == "alephium" else None
         self._job_id_counter = 0
         self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
         self._lock = threading.Lock()
