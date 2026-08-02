@@ -127,10 +127,12 @@ install_python_prereqs() {
 }
 
 generate_zk_pow_cache() {
-    info "Skipping zk-pow cache generation (embedded_cache feature disabled)..."
-    # Cache files are not needed when building without the embedded_cache feature.
-    # The verifier loads cache at runtime from disk instead.
-    :
+    info "Generating zk-pow verifier circuit caches..."
+    cd "$REPO_ROOT/zk-pow"
+    cargo run --release --no-default-features --bin build_cache \
+        src/circuit/v2_cache.bin \
+        src/v1/v1_cache.bin
+    cd "$REPO_ROOT"
 }
 
 build_zk_pow_go_bindings() {
