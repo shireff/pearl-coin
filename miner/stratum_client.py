@@ -3,10 +3,9 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from miner_utils import get_logger
-
 
 @dataclass
 class StratumJob:
@@ -20,8 +19,7 @@ class StratumJob:
     extranonce1: str = ""
     extranonce2_size: int = 4
     difficulty: float = 1.0
-    block_target: int = 0  # original block target from targetBlob (preserved for block validation)
-
+    block_target: int = 0  # original block target from targetBlob
 
 class StratumClient:
     def __init__(
@@ -46,16 +44,12 @@ class StratumClient:
         self._subscribed = False
         self._authorized = False
         self._current_job: Optional[StratumJob] = None
-        # Pool share target — easier than block target; used for share submission.
-        # Alephium pools like Kryptex send the block target in targetBlob, never
-        # set_difficulty/set_target. Default to difficulty=1 share target so mining
-        # starts immediately with a sensible threshold.
-        # difficulty=1 → share_target = 2^(256-32) = 2^224 - 1
-        self._share_target: Optional[int] = (
-            (1 << 224) - 1 if algorithm == "alephium" else None
-        )
+        # Pool share target — set only via set_target or set_difficulty.
+        # When None, targetBlob from mining.notify is used directly as share target.
+        # Kryptex Alephium sends the actual pool share target in targetBlob.
+        self._share_target: Optional[int] = None
         self._job_id_counter = 0
-        self._pending_requests: dict[int, list[threading.Event, Any]] = {}
+        self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
         self._lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -64,7 +58,7 @@ class StratumClient:
     def connect(self) -> bool:
         try:
             if self.pool_url.startswith("stratum+tcp://"):
-                pool_url = self.pool_url[len("stratum+tcp://") :]
+                pool_url = self.pool_url[len("stratum+tcp://"):]
             else:
                 pool_url = self.pool_url
 
@@ -76,7 +70,7 @@ class StratumClient:
                 port = 3333
 
             self._sock = socket.create_connection((host, port), timeout=10)
-            self._sock.settimeout(0.1)  # 100ms timeout — releases GIL between recvs
+            self._sock.settimeout(0.1)
             self._connected = True
             self._stop_event.clear()
 
@@ -113,12 +107,8 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # Official Alephium Stratum spec: [jobId, nonce, workerId?]
-            # workerId is optional — omit if not available
             worker_id = getattr(self, "_worker_id", "") or ""
             params = [job_id, nonce, worker_id] if worker_id else [job_id, nonce]
-            # Kryptex Alephium pool uses fire-and-forget: no response is sent back.
-            # Treat successful send as accepted — pool will show stats in dashboard.
             sent = self._send_fire_and_forget("mining.submit", params)
             if sent:
                 self._logger.info(f"Pool submit sent (fire-and-forget): job={job_id} nonce={nonce[:16]}...")
@@ -161,7 +151,6 @@ class StratumClient:
             self._logger.error(f"Failed to authorize with pool: {self.username}")
             return False
 
-        # Capture workerId if pool returns it (optional per Alephium spec)
         auth_result = authorize_response.get("result")
         if isinstance(auth_result, str) and auth_result:
             self._worker_id = auth_result
@@ -171,11 +160,6 @@ class StratumClient:
         return True
 
     def _send_fire_and_forget(self, method: str, params: list) -> bool:
-        """Send a request without waiting for a response (fire-and-forget).
-
-        Used for Alephium mining.submit where Kryptex pool never sends
-        a response back with a matching id.
-        """
         if not self._sock:
             return False
         self._job_id_counter += 1
@@ -190,9 +174,7 @@ class StratumClient:
             self._logger.error(f"Failed to send {method}: {e}")
             return False
 
-    def _send_request(
-        self, method: str, params: list, timeout: float = 10.0
-    ) -> Optional[dict]:
+    def _send_request(self, method: str, params: list, timeout: float = 10.0) -> Optional[dict]:
         if not self._sock:
             return None
 
@@ -242,7 +224,6 @@ class StratumClient:
                         continue
                     self._handle_message(line)
             except _socket.timeout:
-                # Normal — timeout releases GIL so mining thread can run
                 continue
             except Exception as e:
                 if not self._stop_event.is_set():
@@ -290,36 +271,31 @@ class StratumClient:
                 return
 
             param0 = params[0]
-            
+
             if isinstance(param0, dict):
                 job_id = str(param0.get("jobId", ""))
                 header_blob_hex = str(param0.get("headerBlob", ""))
                 target_blob_hex = str(param0.get("targetBlob", ""))
                 height = param0.get("height", 0)
-                txs_blob_hex = str(param0.get("txsBlob", ""))
             elif isinstance(param0, str) and len(params) >= 3:
                 job_id = str(param0)
                 header_blob_hex = str(params[1])
                 target_blob_hex = str(params[2])
                 height = 0
-                txs_blob_hex = ""
             else:
                 self._logger.warning(f"Unexpected mining.notify format: {type(param0)}")
                 return
 
             if not header_blob_hex or not target_blob_hex:
-                self._logger.warning(f"Empty header/target from pool")
+                self._logger.warning("Empty header/target from pool")
                 return
 
             blob = bytes.fromhex(header_blob_hex)
             block_target = int(target_blob_hex, 16)
 
-            # Resolve the actual share target to use.
-            # Kryptex (and most Alephium pools) send the block target in
-            # targetBlob — that is far too hard (~2^232) for regular share
-            # submission. Use the stored pool share target instead, falling
-            # back to the difficulty=1 default (2^224 - 1) if nothing has
-            # been set via set_difficulty / set_target.
+            # Use _share_target if set via set_target/set_difficulty,
+            # otherwise use targetBlob directly — Kryptex embeds the pool
+            # share target in targetBlob, so this is the correct default.
             with self._lock:
                 share_target = self._share_target
             target = share_target if share_target is not None else block_target
@@ -337,12 +313,10 @@ class StratumClient:
                 self._current_job = job
 
             self._logger.info(
-                f"New job from pool: id={job_id} share_target={target:#x} "
-                f"block_target={block_target:#x} blob_len={len(blob)} height={height}"
+                f"New job: id={job_id} target={target:#x} blob_len={len(blob)} height={height}"
             )
 
             if self.on_job:
-                # Run callback in separate thread so _read_loop is not blocked
                 _t = threading.Thread(target=self.on_job, args=(job,), daemon=True)
                 _t.start()
         except Exception as e:
@@ -352,21 +326,13 @@ class StratumClient:
         try:
             if params and len(params) > 0:
                 difficulty = float(params[0])
-                # Alephium share target = 2^256 / (difficulty * 2^24)
-                # difficulty=1 → share_target = 2^232 = 0x00000000ffffffff...
-                if difficulty > 0:
-                    share_target = int((2**256) / (difficulty * (2**24)))
-                    share_target = min(share_target, (1 << 256) - 1)
-                else:
-                    share_target = (1 << 224) - 1  # fallback: difficulty=1
+                # Log only — Kryptex embeds the actual share target in targetBlob.
+                # Do not override _share_target from difficulty since targetBlob
+                # is already the correct pool share target.
                 with self._lock:
-                    self._share_target = share_target
                     if self._current_job:
-                        self._current_job.target = share_target
                         self._current_job.difficulty = difficulty
-                self._logger.info(
-                    f"Pool set difficulty: {difficulty} → share_target={share_target:#x}"
-                )
+                self._logger.info(f"Pool set difficulty: {difficulty}")
         except Exception as e:
             self._logger.error(f"Failed to parse set_difficulty: {e}")
 
@@ -382,7 +348,6 @@ class StratumClient:
             self._logger.error(f"Failed to parse set_extranonce: {e}")
 
     def _handle_set_target(self, params) -> None:
-        """Handle mining.set_target — pool sets an easier target for share submission."""
         try:
             target_hex = str(params[0]) if isinstance(params, list) and len(params) > 0 else str(params)
             target_val = int(target_hex, 16)
@@ -407,5 +372,4 @@ class StratumClient:
             data_list[0] = message
             event.set()
         else:
-            # Log unmatched responses — catches pool errors on fire-and-forget submits
             self._logger.info(f"[Pool response] id={request_id} {message}")
