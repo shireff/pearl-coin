@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from miner_utils import get_logger
-from stratum_client import StratumClient, StratumJob
+from .stratum_client import StratumClient, StratumJob
 
 
 @dataclass

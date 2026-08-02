@@ -453,6 +453,8 @@ class AlephiumMiningSession:
         self.nonces_per_round = nonces_per_round
         self._base_nonce: int = 0
         self._nonce_initialized: bool = False  # set to True after first extranonce-based init
+        from miner_utils import get_logger as _get_logger
+        self._logger = _get_logger("alephium_session")
         # Pre-allocate zero-padded blob (320 bytes) — last 18 bytes stay zero
         self._blob_gpu = torch.zeros(self.BLOB_PADDED_LEN, dtype=torch.uint8, device="cuda")
         self._target_gpu = torch.empty(32, dtype=torch.uint8, device="cuda")
@@ -492,8 +494,7 @@ class AlephiumMiningSession:
             extranonce_val = int.from_bytes(extranonce_bytes, "big")
             self._base_nonce = extranonce_val << 48
             self._nonce_initialized = True
-            import logging as _log
-            _log.getLogger("miner_gpu").info(
+            self._logger.info(
                 f"[Alephium] extranonce={extranonce_bytes.hex()} → base_nonce={self._base_nonce:#018x}"
             )
 
@@ -523,15 +524,13 @@ class AlephiumMiningSession:
             self._round_count = 0
         self._round_count += 1
         if self._round_count % 1000 == 1:
-            import logging as _log
-            _log.getLogger("miner_gpu").info(
+            self._logger.info(
                 f"[Alephium diag] round={self._round_count} base_nonce={self._base_nonce} "
                 f"found={found} nonce={nonce} "
                 f"target_hex={job.target:#x}"
             )
         if found:
-            import logging as _log
-            _log.getLogger("miner_gpu").info(
+            self._logger.info(
                 f"[Alephium WINNER] nonce={nonce} job_id={getattr(job, 'job_id', '?')}"
             )
 
@@ -552,8 +551,7 @@ class AlephiumMiningSession:
             h = _b3.blake3(bytes(b)).digest()
             target = self._last_target_bytes
             if h > target:
-                import logging as _log
-                _log.getLogger("miner_gpu").warning(
+                self._logger.warning(
                     f"GPU hash INVALID: {h.hex()} > target {target.hex()} — skipping"
                 )
                 return False, "", ""
