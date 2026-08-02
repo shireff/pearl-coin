@@ -18,6 +18,7 @@ class PoolMiningJob:
     blob: bytes = field(default=b"")
     difficulty: float = 1.0
     height: int = 0
+    extranonce: str = ""  # pool extranonce from mining.set_extranonce
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +135,8 @@ class PoolMiningClient:
         self.disconnect()
 
     def _convert_job(self, stratum_job: StratumJob) -> None:
+        # Get current extranonce from stratum client
+        extranonce = getattr(self._stratum, "_extranonce1", "") or ""
         with self._job_lock:
             self._current_job = PoolMiningJob(
                 incomplete_header_bytes=stratum_job.blob,
@@ -142,4 +145,5 @@ class PoolMiningClient:
                 blob=stratum_job.blob,
                 difficulty=stratum_job.difficulty,
                 height=getattr(stratum_job, "height", 0) or 0,
+                extranonce=extranonce,
             )

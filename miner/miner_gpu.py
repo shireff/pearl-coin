@@ -490,14 +490,30 @@ class AlephiumMiningSession:
         # Since the kernel writes nonce as big-endian uint64 at bytes [294:302],
         # bytes [294:295] = (nonce >> 48) & 0xFFFF.
         # So we start base_nonce = extranonce_value << 48.
-        if not self._nonce_initialized and len(blob_bytes) >= 280:
-            extranonce_bytes = blob_bytes[278:280]
-            extranonce_val = int.from_bytes(extranonce_bytes, "big")
-            self._base_nonce = extranonce_val << 48
-            self._nonce_initialized = True
-            self._logger.info(
-                f"[Alephium] extranonce={extranonce_bytes.hex()} → base_nonce={self._base_nonce:#018x}"
-            )
+        if not self._nonce_initialized:
+            # Use the pool extranonce from mining.set_extranonce (passed via job.extranonce).
+            # This is the 2-byte value the pool uses to filter valid shares.
+            pool_extranonce = getattr(job, "extranonce", "") or ""
+            if pool_extranonce and len(pool_extranonce) >= 2:
+                try:
+                    extranonce_bytes = bytes.fromhex(pool_extranonce)[:2]
+                    extranonce_val = int.from_bytes(extranonce_bytes, "big")
+                    self._base_nonce = extranonce_val << 48
+                    self._nonce_initialized = True
+                    self._logger.info(
+                        f"[Alephium] extranonce={extranonce_bytes.hex()} (from set_extranonce) → base_nonce={self._base_nonce:#018x}"
+                    )
+                except Exception:
+                    pass
+            if not self._nonce_initialized and len(blob_bytes) >= 280:
+                # Fallback: use blob[278:280] if no extranonce from pool
+                extranonce_bytes = blob_bytes[278:280]
+                extranonce_val = int.from_bytes(extranonce_bytes, "big")
+                self._base_nonce = extranonce_val << 48
+                self._nonce_initialized = True
+                self._logger.info(
+                    f"[Alephium] extranonce={extranonce_bytes.hex()} (from blob fallback) → base_nonce={self._base_nonce:#018x}"
+                )
 
         # Target as big-endian uint8[32]
         target_bytes = job.target.to_bytes(32, "big")
