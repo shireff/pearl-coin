@@ -99,8 +99,8 @@ void alph_mine_kernel(
     //   nonce_be[0] = (nonce >> 56) & 0xFF  (most significant)
     //   nonce_be[7] = nonce & 0xFF           (least significant)
     // Split into three uint32 words covering bytes 292-304:
-    //   word73[31:16] = pool data bytes 292-293 (preserved from r[73])
-    //   word73[15:0]  = nonce_be[0:2] = nonce >> 48 as big-endian 16-bit
+    //   word73[15:0]  = pool data bytes 292-293 (preserved from r[73], lower 16 = lower addr)
+    //   word73[31:16] = nonce_be[0:2] = nonce >> 48 as big-endian 16-bit (upper 16 = higher addr)
     //   word74[31:0]  = nonce_be[2:6] = nonce[47:16] as big-endian 32-bit
     //   word75[31:16] = nonce_be[6:8] = nonce[15:0] as big-endian 16-bit
     //   word75[15:0]  = 0x0000  (bytes 302-303 = padding zeros)
@@ -109,9 +109,13 @@ void alph_mine_kernel(
     uint32_t n1 = static_cast<uint32_t>((nonce >> 16) & 0xFFFFFFFF);
     uint16_t n2 = static_cast<uint16_t>(nonce & 0xFFFF);
 
-    // word73: preserve upper 16 bits (bytes 292-293 from pool), set lower 16 bits = n0 big-endian
-    // In LE uint32: byte292=pool, byte293=pool, byte294=n0_hi, byte295=n0_lo
-    r[73] = (r[73] & 0xFFFF0000u) | static_cast<uint32_t>(__byte_perm(n0, 0, 0x0001));
+    // word73 in LE uint32: lower 16 bits = bytes 292-293 (pool data, preserve)
+    //                      upper 16 bits = bytes 294-295 (nonce_be[0:2], write)
+    // n0 = (nonce >> 48) & 0xFFFF, big-endian: byte294 = n0_hi, byte295 = n0_lo
+    // In LE uint32 upper half: bit31..24 = byte295 = n0_lo, bit23..16 = byte294 = n0_hi
+    r[73] = (r[73] & 0x0000FFFFu)
+          | (static_cast<uint32_t>(n0 & 0xFFu) << 24)
+          | (static_cast<uint32_t>((n0 >> 8) & 0xFFu) << 16);
 
     // word74: n1 as big-endian uint32
     // bytes [296:300] = nonce_be[2:6]
