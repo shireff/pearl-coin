@@ -443,13 +443,13 @@ class AlephiumMiningSession:
     Optimizations:
     - Blob pre-allocated as 320 bytes (zero-padded) — avoids per-round allocation
     - Target pre-allocated and updated in-place
-    - nonces_per_round = 2^22 covers 4M nonces per kernel launch (~4ms on RTX 4060)
+    - nonces_per_round = 2^23 covers 8M nonces per kernel launch (~8ms on RTX 4060)
     - Nonce counter increments across rounds — no duplicate nonce retries
     """
 
     BLOB_PADDED_LEN = 320  # 302 bytes + 18 zero bytes padding to 5×64
 
-    def __init__(self, nonces_per_round: int = 1 << 22):
+    def __init__(self, nonces_per_round: int = 1 << 23):
         self.nonces_per_round = nonces_per_round
         self._base_nonce: int = 0
         self._nonce_initialized: bool = False  # set to True after first extranonce-based init
@@ -743,7 +743,7 @@ def main():
                 elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0
                 if isinstance(session, AlephiumMiningSession):
                     tmok_per_s = session.nonces_per_round / elapsed / 1e6 if elapsed > 0 else 0.0
-                    logger.info(f"GPU round time: {elapsed*1000:.1f}ms  nonces={session.nonces_per_round}  tmok/s={tmok_per_s:.0f}")
+                    logger.debug(f"GPU round time: {elapsed*1000:.1f}ms  nonces={session.nonces_per_round}  tmok/s={tmok_per_s:.0f}")
                 else:
                     tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                     tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0

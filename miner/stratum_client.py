@@ -174,7 +174,7 @@ class StratumClient:
         request = {"id": request_id, "method": method, "params": params}
         try:
             payload = json.dumps(request) + "\n"
-            self._logger.info(f"[STRATUM SEND] {payload.strip()}")
+            self._logger.debug(f"[STRATUM SEND] {payload.strip()}")
             self._sock.sendall(payload.encode("utf-8"))
             return True
         except Exception as e:
@@ -193,7 +193,7 @@ class StratumClient:
         request = {"id": request_id, "method": method, "params": params}
         try:
             payload = json.dumps(request) + "\n"
-            self._logger.info(f"[STRATUM SEND] {payload.strip()}")
+            self._logger.debug(f"[STRATUM SEND] {payload.strip()}")
             self._sock.sendall(payload.encode("utf-8"))
         except Exception as e:
             self._logger.error(f"Failed to send request {method}: {e}")
@@ -245,7 +245,7 @@ class StratumClient:
             self.on_error("Connection lost")
 
     def _handle_message(self, raw: str) -> None:
-        self._logger.info(f"[STRATUM RECV] {raw}")
+        self._logger.debug(f"[STRATUM RECV] {raw}")
         try:
             message = json.loads(raw)
         except json.JSONDecodeError:
