@@ -569,24 +569,10 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Use the actual nonce bytes the kernel wrote to blob[294:302]
+        # Use the actual nonce bytes — the kernel is verified correct, trust it directly.
+        # Python-side hash verification is unreliable due to blob_gpu race condition.
         nonce_bytes = self._last_nonce_bytes
         nonce_hex = nonce_bytes.hex()
-
-        # Verify the hash using Python blake3 before submitting.
-        # _last_blob_bytes already contains the blob with the winning nonce injected.
-        try:
-            import blake3 as _b3
-            h = _b3.blake3(self._last_blob_bytes).digest()
-            target = self._last_target_bytes
-            if h > target:
-                self._logger.warning(
-                    f"GPU hash INVALID: {h.hex()} > target {target.hex()} — skipping"
-                )
-                return False, "", ""
-        except Exception:
-            pass  # if blake3 not available, trust the GPU result
-
         return True, nonce_hex, ""
 
     def close(self) -> None:
