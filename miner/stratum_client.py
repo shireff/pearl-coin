@@ -145,6 +145,11 @@ class StratumClient:
                 self._extranonce1 = str(extranonce[0])
             else:
                 self._extranonce1 = str(extranonce)
+        elif isinstance(result, str) and result:
+            # Kryptex Alephium: subscribe result is the session/worker id (e.g. "00000000")
+            # Store it so submit_share sends [job_id, nonce, worker_id] not [job_id, nonce]
+            self._worker_id = result
+            self._logger.info(f"Pool subscribe returned worker_id: {result}")
 
         authorize_response = self._send_request(
             "mining.authorize", [self.username, self.password]
@@ -155,9 +160,12 @@ class StratumClient:
 
         auth_result = authorize_response.get("result")
         if isinstance(auth_result, str) and auth_result:
+            # Pool returned a string worker_id from authorize — use it
             self._worker_id = auth_result
-        else:
+        elif not self._worker_id:
+            # No worker_id from subscribe or authorize — leave empty
             self._worker_id = ""
+        # else: keep existing _worker_id set from subscribe result
         self._authorized = True
         return True
 
