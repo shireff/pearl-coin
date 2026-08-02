@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import blake3
+
 _local_root = Path(__file__).resolve().parent
 _local_pearl_gemm_src = str(_local_root / "pearl-gemm" / "src")
 if _local_pearl_gemm_src not in sys.path:
@@ -49,6 +51,34 @@ class MiningResult:
     result_hex: str = ""
     job_id: str = ""
     combo_index: int = -1
+
+
+def alephium_submit_nonce_24(nonce: int) -> bytes:
+    """Canonical Alephium pool nonce width (24-byte big-endian)."""
+    return int(nonce).to_bytes(24, "big")
+
+
+def alephium_double_blake3(header_blob: bytes, nonce: int) -> bytes:
+    """Compute the official Alephium double-BLAKE3 candidate contract.
+
+    Canonical serialization is nonce24 || headerBlob, then a two-stage BLAKE3 digest.
+    """
+    nonce_bytes = alephium_submit_nonce_24(nonce)
+    inner = blake3.blake3(nonce_bytes + header_blob).digest()
+    return blake3.blake3(inner).digest()
+
+
+def alephium_chain_index(hash_bytes: bytes) -> int:
+    """Derive the Alephium chain bucket from the final digest byte."""
+    return int(hash_bytes[31]) % 16
+
+
+def alephium_group_valid(hash_bytes: bytes, from_group: int | None, to_group: int | None) -> bool:
+    """Validate the final Alephium chain-index gate if applicable."""
+    if from_group is None or to_group is None:
+        return True
+    big_index = alephium_chain_index(hash_bytes)
+    return (big_index // 4) == int(from_group) and (big_index % 4) == int(to_group)
 
 
 def allocate_aligned_byte_tensor(num_bytes: int, align: int = 16, device: str = "cuda") -> torch.Tensor:
@@ -462,6 +492,8 @@ class AlephiumMiningSession:
         self._t_end = torch.cuda.Event(enable_timing=True)
         self._last_found: bool = False
         self._last_nonce: int = -1
+        self._last_hash_hex: str = ""
+        self._last_chain_ok: bool = False
         # Alephium pool submissions are expected to carry the nonce in the
         # canonical 24-byte big-endian form. The GPU kernel still searches a
         # compact uint64 counter, but the emitted share payload must be widened
@@ -547,8 +579,19 @@ class AlephiumMiningSession:
         if found and self._last_nonce != 0xFFFFFFFFFFFFFFFF:
             self._last_nonce_bytes = self._last_nonce.to_bytes(24, "big")
             self._last_blob_bytes = bytes(self._last_blob_bytes)
+            self._last_hash_hex = alephium_double_blake3(
+                self._last_blob_bytes,
+                self._last_nonce,
+            ).hex()
+            self._last_chain_ok = alephium_group_valid(
+                bytes.fromhex(self._last_hash_hex),
+                getattr(job, "from_group", None),
+                getattr(job, "to_group", None),
+            )
         else:
             self._last_nonce_bytes = b"\x00" * 24
+            self._last_hash_hex = ""
+            self._last_chain_ok = False
 
         # Diagnostic: log every 1000 rounds to confirm shares are being found
         if not hasattr(self, "_round_count"):
@@ -574,7 +617,7 @@ class AlephiumMiningSession:
         # matches the pool's expected submit width.
         nonce_bytes = self._last_nonce_bytes
         nonce_hex = nonce_bytes.hex()
-        return True, nonce_hex, ""
+        return True, nonce_hex, self._last_hash_hex
 
     def close(self) -> None:
         pass

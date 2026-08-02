@@ -19,6 +19,8 @@ class PoolMiningJob:
     difficulty: float = 1.0
     height: int = 0
     extranonce: str = ""  # pool extranonce from mining.set_extranonce
+    from_group: Optional[int] = None
+    to_group: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,13 +139,26 @@ class PoolMiningClient:
     def _convert_job(self, stratum_job: StratumJob) -> None:
         # Get current extranonce from stratum client
         extranonce = getattr(self._stratum, "_extranonce1", "") or ""
+        from_group: Optional[int] = None
+        to_group: Optional[int] = None
+        blob = bytes(stratum_job.blob)
+        if len(blob) >= 280:
+            # Best-effort extraction from the Alephium pool header prefix. The
+            # group ids are not included in the Python-side share contract, but
+            # the final kernel will use them to validate the group-index gate.
+            prefix = blob[278:280]
+            if len(prefix) >= 2:
+                from_group = int(prefix[0]) & 0x0F
+                to_group = int(prefix[1]) & 0x0F
         with self._job_lock:
             self._current_job = PoolMiningJob(
-                incomplete_header_bytes=stratum_job.blob,
+                incomplete_header_bytes=blob,
                 target=stratum_job.target,
                 job_id=stratum_job.job_id,
-                blob=stratum_job.blob,
+                blob=blob,
                 difficulty=stratum_job.difficulty,
                 height=getattr(stratum_job, "height", 0) or 0,
                 extranonce=extranonce,
+                from_group=from_group,
+                to_group=to_group,
             )
