@@ -131,6 +131,26 @@ class PoolMiningClient:
     def _on_pool_error(self, error: str) -> None:
         self._logger.error(f"Pool error: {error}")
         self._connected = False
+        # Auto-reconnect in background thread
+        import threading as _threading
+        _threading.Thread(target=self._reconnect_loop, daemon=True).start()
+
+    def _reconnect_loop(self) -> None:
+        import time as _time
+        attempt = 0
+        while not self._connected:
+            attempt += 1
+            wait = min(5 * attempt, 30)
+            self._logger.info(f"Reconnecting in {wait}s (attempt {attempt})...")
+            _time.sleep(wait)
+            try:
+                if self._stratum:
+                    self._stratum.disconnect()
+                if self.connect():
+                    self._logger.info("Reconnected to pool successfully")
+                    return
+            except Exception as e:
+                self._logger.error(f"Reconnect attempt {attempt} failed: {e}")
 
     def close(self) -> None:
         """Close the pool connection cleanly."""

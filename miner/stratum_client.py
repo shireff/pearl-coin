@@ -295,12 +295,6 @@ class StratumClient:
             blob = bytes.fromhex(header_blob_hex)
             block_target = int(target_blob_hex, 16)
 
-            # Wait briefly for set_difficulty to arrive before processing first job.
-            # Kryptex sends set_difficulty right after authorize, before the first notify.
-            # A short wait here avoids the pool connection timeout that a longer wait causes.
-            if self.algorithm == "alephium":
-                self._difficulty_received.wait(timeout=0.5)
-
             # Use _share_target if set via set_target/set_difficulty,
             # otherwise use targetBlob directly — Kryptex embeds the pool
             # share target in targetBlob, so this is the correct default.
