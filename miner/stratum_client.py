@@ -20,6 +20,7 @@ class StratumJob:
     extranonce1: str = ""
     extranonce2_size: int = 4
     difficulty: float = 1.0
+    block_target: int = 0  # original block target from targetBlob (preserved for block validation)
 
 
 class StratumClient:
@@ -45,6 +46,14 @@ class StratumClient:
         self._subscribed = False
         self._authorized = False
         self._current_job: Optional[StratumJob] = None
+        # Pool share target — easier than block target; used for share submission.
+        # Alephium pools like Kryptex send the block target in targetBlob, never
+        # set_difficulty/set_target. Default to difficulty=1 share target so mining
+        # starts immediately with a sensible threshold.
+        # difficulty=1 → share_target = 2^(256-32) = 2^224 - 1
+        self._share_target: Optional[int] = (
+            (1 << 224) - 1 if algorithm == "alephium" else None
+        )
         self._job_id_counter = 0
         self._pending_requests: dict[int, list[threading.Event, Any]] = {}
         self._lock = threading.Lock()
@@ -303,7 +312,17 @@ class StratumClient:
                 return
 
             blob = bytes.fromhex(header_blob_hex)
-            target = int(target_blob_hex, 16)
+            block_target = int(target_blob_hex, 16)
+
+            # Resolve the actual share target to use.
+            # Kryptex (and most Alephium pools) send the block target in
+            # targetBlob — that is far too hard (~2^232) for regular share
+            # submission. Use the stored pool share target instead, falling
+            # back to the difficulty=1 default (2^224 - 1) if nothing has
+            # been set via set_difficulty / set_target.
+            with self._lock:
+                share_target = self._share_target
+            target = share_target if share_target is not None else block_target
 
             job = StratumJob(
                 job_id=job_id,
@@ -311,13 +330,15 @@ class StratumClient:
                 target=target,
                 height=height,
                 clean_jobs=True,
+                block_target=block_target,
             )
 
             with self._lock:
                 self._current_job = job
 
             self._logger.info(
-                f"New job from pool: id={job_id} target={target:#x} blob_len={len(blob)} height={height}"
+                f"New job from pool: id={job_id} share_target={target:#x} "
+                f"block_target={block_target:#x} blob_len={len(blob)} height={height}"
             )
 
             if self.on_job:
@@ -331,10 +352,21 @@ class StratumClient:
         try:
             if params and len(params) > 0:
                 difficulty = float(params[0])
+                # Alephium share target = 2^256 / (difficulty * 2^24)
+                # difficulty=1 → share_target = 2^232 = 0x00000000ffffffff...
+                if difficulty > 0:
+                    share_target = int((2**256) / (difficulty * (2**24)))
+                    share_target = min(share_target, (1 << 256) - 1)
+                else:
+                    share_target = (1 << 224) - 1  # fallback: difficulty=1
                 with self._lock:
+                    self._share_target = share_target
                     if self._current_job:
+                        self._current_job.target = share_target
                         self._current_job.difficulty = difficulty
-                self._logger.info(f"Pool set difficulty: {difficulty}")
+                self._logger.info(
+                    f"Pool set difficulty: {difficulty} → share_target={share_target:#x}"
+                )
         except Exception as e:
             self._logger.error(f"Failed to parse set_difficulty: {e}")
 
@@ -355,6 +387,7 @@ class StratumClient:
             target_hex = str(params[0]) if isinstance(params, list) and len(params) > 0 else str(params)
             target_val = int(target_hex, 16)
             with self._lock:
+                self._share_target = target_val
                 if self._current_job:
                     self._current_job.target = target_val
             self._logger.info(f"Pool set target: {target_hex} ({target_val:#x})")
