@@ -27,6 +27,29 @@ ALGORITHM = "alephium"
 NONCES_PER_ROUND = 1 << 22  # 4M nonces per kernel launch
 
 
+def alephium_submit_nonce(nonce: int) -> bytes:
+    """Return the canonical Alephium submit nonce representation.
+
+    The pool-side protocol expects the nonce in a 24-byte big-endian form
+    (48 hex characters), even though the GPU kernel currently searches a
+    compact 64-bit counter. We therefore left-pad the found counter to the
+    canonical 24-byte width before handing it to the pool.
+    """
+    return int(nonce).to_bytes(24, "big")
+
+
+def alephium_pow_hash(header_blob: bytes, nonce: int) -> bytes:
+    """Compute the official Alephium PoW hash shape for the submit path.
+
+    The canonical Alephium serialization contract is a 24-byte nonce field
+    prepended to the header blob, followed by the official double-BLAKE3
+    digest over the resulting byte stream.
+    """
+    nonce_bytes = alephium_submit_nonce(nonce)
+    inner = blake3.blake3(nonce_bytes + header_blob).digest()
+    return blake3.blake3(inner).digest()
+
+
 def main():
     logger = get_logger("mine_alph")
 
@@ -117,19 +140,14 @@ def main():
                 )
 
                 if found and nonce >= 0:
-                    # The kernel varies bytes [294:302] only, preserving [278:294] from pool.
-                    # Reconstruct the full 8-byte nonce that was written to the blob:
-                    # base_nonce + winning_tid = nonce (absolute), but bytes [294:302]
-                    # in the blob after kernel = nonce written as big-endian 8 bytes.
-                    nonce_bytes = nonce.to_bytes(8, "big")
+                    nonce_bytes = alephium_submit_nonce(nonce)
                     nonce_hex = nonce_bytes.hex()
-                    # Verify the hash matches before submitting
-                    b = bytearray(blob_bytes)
-                    b[294:302] = nonce_bytes
-                    h = blake3.blake3(bytes(b)).digest()
+                    h = alephium_pow_hash(blob_bytes, nonce)
                     target_val = current_job.target.to_bytes(32, "big")
                     valid = h <= target_val
-                    logger.info(f"SHARE FOUND: nonce={nonce_hex} hash={h.hex()[:16]}... valid={valid}")
+                    logger.info(
+                        f"SHARE FOUND: nonce={nonce_hex} hash={h.hex()[:16]}... valid={valid}"
+                    )
                     if valid:
                         success = client.submit_plain_proof(nonce_hex, "", current_job.job_id)
                         if success:
@@ -137,7 +155,9 @@ def main():
                         else:
                             logger.warning("Share submit failed")
                     else:
-                        logger.warning(f"Share hash INVALID — skipping submit. hash={h.hex()} target={target_val.hex()}")
+                        logger.warning(
+                            f"Share hash INVALID — skipping submit. hash={h.hex()} target={target_val.hex()}"
+                        )
 
             except queue.Empty:
                 logger.warning("Job queue empty — waiting...")

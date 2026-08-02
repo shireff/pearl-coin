@@ -462,7 +462,7 @@ class AlephiumMiningSession:
         self._t_end = torch.cuda.Event(enable_timing=True)
         self._last_found: bool = False
         self._last_nonce: int = -1
-        self._last_nonce_bytes: bytes = b"\x00" * 8
+        self._last_nonce_bytes: bytes = b"\x00" * 24
         self._last_blob_prefix: bytes = b"\x00" * 16
         self._last_blob_bytes: bytes = b"\x00" * 302
         self._last_target_bytes: bytes = b"\xff" * 32
@@ -536,18 +536,15 @@ class AlephiumMiningSession:
         _raw_nonce = int(nonce)
         self._last_nonce = _raw_nonce & 0xFFFFFFFFFFFFFFFF if _raw_nonce < 0 else _raw_nonce
 
-        # If winner found, reconstruct the winning nonce bytes.
-        # The kernel writes nonce = base_nonce_unsigned + tid as big-endian uint64 at bytes [294:302].
-        # We use _last_nonce (already converted to unsigned) to compute those bytes.
-        # We do NOT read from blob_gpu because the prefetch thread may have overwritten it.
+        # If winner found, canonicalize the winning nonce into the pool's
+        # expected 24-byte big-endian form before the share is emitted.
+        # The kernel still searches a compact uint64 counter, but the submit
+        # contract requires the 24-byte nonce width that the pool verifies.
         if found and self._last_nonce != 0xFFFFFFFFFFFFFFFF:
-            self._last_nonce_bytes = self._last_nonce.to_bytes(8, "big")
-            # Reconstruct blob with winning nonce for hash verification
-            winning_blob = bytearray(self._last_blob_bytes)  # blob from job (before nonce injection)
-            winning_blob[294:302] = self._last_nonce_bytes
-            self._last_blob_bytes = bytes(winning_blob)
+            self._last_nonce_bytes = self._last_nonce.to_bytes(24, "big")
+            self._last_blob_bytes = bytes(self._last_blob_bytes)
         else:
-            self._last_nonce_bytes = b"\x00" * 8
+            self._last_nonce_bytes = b"\x00" * 24
 
         # Diagnostic: log every 1000 rounds to confirm shares are being found
         if not hasattr(self, "_round_count"):
