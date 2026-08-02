@@ -14,7 +14,7 @@ if str(_local_root) not in sys.path:
     sys.path.insert(0, str(_local_root))
 
 from miner_utils import get_logger
-from pool_mining_client import PoolMiningClient, PoolMiningJob
+from miner.pool_mining_client import PoolMiningClient, PoolMiningJob
 from pearl_gemm import alph_mine_batch
 import torch
 
