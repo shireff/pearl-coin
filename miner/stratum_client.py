@@ -125,13 +125,12 @@ class StratumClient:
                     f"Share rate-limited ({elapsed_since_last:.2f}s < 2.0s): "
                     f"job={job_id} nonce={nonce[:16]}..."
                 )
-                return True  # pretend sent
                 return True  # pretend sent — don't spam pool
             self._last_submit_time = now
-            # Kryptex Alephium: fire-and-forget, pool does not respond to submit
+            # Kryptex Alephium: params = [jobId, nonce] only — no worker_id appended.
+            # Appending the session token (worker_id='00000000') confuses the pool
+            # and prevents shares from being attributed to the correct worker.
             params = [job_id, nonce]
-            if self._worker_id:
-                params.append(self._worker_id)
             sent = self._send_fire_and_forget("mining.submit", params)
             if sent:
                 self._logger.info(

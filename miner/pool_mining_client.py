@@ -127,7 +127,7 @@ class PoolMiningClient:
 
         self._logger.info(
             f"[SUBMIT] algorithm={self.algorithm}  job_id={target_job_id}  "
-            f"nonce={nonce_preview}  nonce_len={len(nonce)//2}B  "
+            f"nonce={nonce_preview}  nonce_full={nonce}  nonce_len={len(nonce)//2}B  "
             f"result_hex={result_hex[:16] if result_hex else '<empty>'}  worker_id={worker_id}"
         )
 
