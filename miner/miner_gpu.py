@@ -849,9 +849,9 @@ def main():
                         ok, nonce_hex, result_hex = session.get_last_result()
                         logger.info(
                             f"[WINNER] GPU found candidate  ok={ok}  "
-                            f"nonce_hex={nonce_hex[:32] if nonce_hex else '<empty>'}  "
+                            f"nonce_hex={nonce_hex}  "
                             f"nonce_len={len(nonce_hex)//2 if nonce_hex else 0}B  "
-                            f"hash={result_hex[:32] if result_hex else '<empty>'}  "
+                            f"hash={result_hex[:64] if result_hex else '<empty>'}  "
                             f"job_id={getattr(mining_job, 'job_id', '?')}  "
                             f"target={getattr(mining_job, 'target', '?'):#x}"
                         )

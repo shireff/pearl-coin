@@ -191,7 +191,21 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
             print(f"{WARN} Kernel returned sentinel nonce — skipping")
             continue
 
-        # Verify hash with Python blake3
+        # ── Strict check: nonce must be within the range we just searched ──────
+        range_start = (base_nonce - nonces_per_round) & 0xFFFFFFFFFFFFFFFF
+        range_end   = (base_nonce - 1) & 0xFFFFFFFFFFFFFFFF
+        # Handle wraparound: if range_start > range_end the range wrapped
+        in_range = (
+            range_start <= nonce_int <= range_end
+            if range_start <= range_end
+            else (nonce_int >= range_start or nonce_int <= range_end)
+        )
+        if not in_range:
+            print(f"{FAIL} Nonce {nonce_int:#018x} is OUTSIDE search range "
+                  f"[{range_start:#018x}, {range_end:#018x}] — kernel bug")
+            sys.exit(2)
+
+        # ── Verify hash with Python blake3 (ground truth) ─────────────────────
         hash_bytes = py_double_blake3(nonce_int, blob_bytes)
         hash_int   = int.from_bytes(hash_bytes, "big")
 
@@ -210,7 +224,7 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
             continue
 
         nonce_hex = nonce_int.to_bytes(24, "big").hex()
-        return job.job_id, nonce_hex, hash_bytes.hex()
+        return job.job_id, nonce_hex, hash_bytes.hex(), blob_bytes, nonce_int
 
     print(f"{FAIL} Timeout: no share found in {timeout}s after {rounds} rounds")
     print(f"       Check: target difficulty, kernel correctness, nonce range")
@@ -220,27 +234,51 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
 # ─── Step 3: submit the share and verify pool response ───────────────────────
 
 def submit_and_verify(client: StratumClient, job_id: str,
-                      nonce_hex: str, result_hex: str) -> None:
+                      nonce_hex: str, result_hex: str,
+                      blob_bytes: bytes, nonce_int: int) -> None:
     print(f"\n{INFO} Submitting share ...")
     print(f"  job_id={job_id}")
     print(f"  nonce_hex={nonce_hex}  ({len(nonce_hex)//2}B)")
-    print(f"  result_hex={result_hex[:32]}...")
+    print(f"  result_hex={result_hex}")
     print(f"  worker_id={client.get_worker_id()!r}")
 
-    # ── checkpoint 1: is the socket still alive? ──────────────────────────────
-    if not client.is_connected():
-        print(f"{FAIL} CHECKPOINT 1: client.is_connected()=False before submit")
-        print("       Cause: pool disconnected us (idle timeout, rate limit, etc.)")
+    # ── checkpoint 1: nonce_hex must be exactly 48 hex chars (24 bytes) ──────
+    if len(nonce_hex) != 48:
+        print(f"{FAIL} CHECKPOINT 1: nonce_hex len={len(nonce_hex)} != 48 — wrong nonce format")
         sys.exit(1)
-    print(f"  CHECKPOINT 1: connected ✓")
+    print(f"  CHECKPOINT 1: nonce_hex length=48 ✓")
 
-    # ── checkpoint 2: does the job_id still match the latest job? ────────────
+    # ── checkpoint 2: nonce must encode correct nonce_int ────────────────────
+    nonce_from_hex = int(nonce_hex, 16)
+    # nonce_int is uint64, nonce_hex is 24-byte big-endian — high 16 bytes are zeros
+    nonce_int_from_hex = nonce_from_hex & 0xFFFFFFFFFFFFFFFF
+    if nonce_int_from_hex != nonce_int:
+        print(f"{FAIL} CHECKPOINT 2: nonce_hex encodes {nonce_int_from_hex:#018x} "
+              f"but kernel found {nonce_int:#018x}")
+        sys.exit(1)
+    print(f"  CHECKPOINT 2: nonce_hex encodes correct nonce {nonce_int:#018x} ✓")
+
+    # ── checkpoint 3: Python blake3 hash must match result_hex ───────────────
+    py_hash = py_double_blake3(nonce_int, blob_bytes)
+    if py_hash.hex() != result_hex:
+        print(f"{FAIL} CHECKPOINT 3: hash mismatch")
+        print(f"    expected: {py_hash.hex()}")
+        print(f"    got:      {result_hex}")
+        sys.exit(1)
+    print(f"  CHECKPOINT 3: Python blake3 hash matches ✓")
+
+    # ── checkpoint 4: connected? ──────────────────────────────────────────────
+    if not client.is_connected():
+        print(f"{FAIL} CHECKPOINT 4: client.is_connected()=False before submit")
+        sys.exit(1)
+    print(f"  CHECKPOINT 4: connected ✓")
+
+    # ── checkpoint 5: job still fresh? ───────────────────────────────────────
     current = client.get_current_job()
     if current and current.job_id != job_id:
-        print(f"{WARN} CHECKPOINT 2: stale job_id={job_id}  "
-              f"current={current.job_id}  — submitting anyway (may be rejected as stale)")
+        print(f"{WARN} CHECKPOINT 5: stale job_id={job_id} current={current.job_id} — submitting anyway")
     else:
-        print(f"  CHECKPOINT 2: job_id fresh ✓")
+        print(f"  CHECKPOINT 5: job_id fresh ✓")
 
     # ── submit ────────────────────────────────────────────────────────────────
     t_submit = time.time()
@@ -256,10 +294,10 @@ def submit_and_verify(client: StratumClient, job_id: str,
     else:
         print(f"\n{FAIL} Share REJECTED by pool")
         print("  Possible causes:")
-        print("  • Stale job (pool moved to new block between mine and submit)")
+        print("  • Stale job")
         print("  • Wrong nonce format (check PEARL_NONCE_SUBMIT_MODE env var)")
-        print("  • Hash does not match pool's verification (wrong blob or nonce serialization)")
-        print("  • Worker not authorized (check username/password)")
+        print("  • Hash does not match pool's verification")
+        print("  • Worker not authorized")
         sys.exit(1)
 
 
@@ -286,14 +324,14 @@ def main() -> None:
           f"blob_len={len(job.blob)}  height={job.height}")
 
     # Step 2
-    job_id, nonce_hex, hash_hex = mine_until_share(
+    job_id, nonce_hex, hash_hex, blob_bytes, nonce_int = mine_until_share(
         client, job,
         nonces_per_round=args.nonces_per_round,
         timeout=args.timeout,
     )
 
     # Step 3
-    submit_and_verify(client, job_id, nonce_hex, hash_hex)
+    submit_and_verify(client, job_id, nonce_hex, hash_hex, blob_bytes, nonce_int)
 
 
 if __name__ == "__main__":
