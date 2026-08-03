@@ -579,6 +579,20 @@ class AlephiumMiningSession:
                 getattr(job, "from_group", None),
                 getattr(job, "to_group", None),
             )
+            # One-time diagnostic: log full blob + nonce + hash for pool verification
+            if not getattr(self, "_diag_logged", False):
+                self._diag_logged = True
+                nonce24_hex = self._last_nonce.to_bytes(24, "big").hex()
+                self._logger.info(
+                    f"[DIAG] job_id={job.job_id}  "
+                    f"blob_len={len(self._last_blob_bytes)}  "
+                    f"blob_hex={self._last_blob_bytes.hex()}  "
+                    f"nonce_full24={nonce24_hex}  "
+                    f"hash={self._last_hash_hex}  "
+                    f"target={job.target:#x}  "
+                    f"hash_int={int(self._last_hash_hex, 16):#066x}  "
+                    f"hash_le_target={int(self._last_hash_hex, 16) <= job.target}"
+                )
         else:
             self._last_nonce_bytes = b"\x00" * 24
             self._last_hash_hex = ""
