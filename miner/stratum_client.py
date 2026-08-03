@@ -306,25 +306,46 @@ class StratumClient:
                 header_blob_hex = str(param0.get("headerBlob", ""))
                 target_blob_hex = str(param0.get("targetBlob", ""))
                 height = param0.get("height", 0)
+                from_group = param0.get("fromGroup")
+                to_group = param0.get("toGroup")
             elif isinstance(param0, str) and len(params) >= 3:
                 job_id = str(param0)
                 header_blob_hex = str(params[1])
                 target_blob_hex = str(params[2])
                 height = 0
+                from_group = None
+                to_group = None
             else:
                 self._logger.warning(f"Unexpected mining.notify format: {type(param0)}")
                 return
 
-            if not header_blob_hex or not target_blob_hex:
-                self._logger.warning("Empty header/target from pool")
+            if not header_blob_hex:
+                self._logger.warning("Empty headerBlob from pool — skipping job")
                 return
 
             blob = bytes.fromhex(header_blob_hex)
-            block_target = int(target_blob_hex, 16)
+
+            # targetBlob is optional on Kryptex Alephium — the pool sends the
+            # share target via mining.set_target / mining.set_difficulty instead.
+            if target_blob_hex:
+                block_target = int(target_blob_hex, 16)
+            else:
+                block_target = 0  # unknown until set_target/set_difficulty arrives
 
             with self._lock:
                 share_target = self._share_target
-            target = share_target if share_target is not None else block_target
+            # Priority: explicit share_target > block_target from targetBlob > max (will never win)
+            if share_target is not None:
+                target = share_target
+            elif block_target:
+                target = block_target
+            else:
+                # No target yet — use 2^256-1 so kernel still runs but won't submit
+                target = 2**256 - 1
+                self._logger.warning(
+                    f"[WARN] Job {job_id}: no target received yet (no targetBlob, no set_target/set_difficulty) "
+                    f"— using max target, shares will NOT be found until pool sends difficulty"
+                )
 
             job = StratumJob(
                 job_id=job_id,
@@ -334,18 +355,19 @@ class StratumClient:
                 clean_jobs=True,
                 block_target=block_target,
             )
+            # Store from/to group on the job object for chain-index validation
+            job._from_group = from_group  # type: ignore[attr-defined]
+            job._to_group = to_group      # type: ignore[attr-defined]
 
             with self._lock:
                 self._current_job = job
 
-            if share_target is not None and share_target != block_target:
-                self._logger.info(
-                    f"New job: id={job_id} share_target={target:#x} block_target={block_target:#x} blob_len={len(blob)} height={height}"
-                )
-            else:
-                self._logger.info(
-                    f"New job: id={job_id} target={target:#x} blob_len={len(blob)} height={height}"
-                )
+            self._logger.info(
+                f"New job: id={job_id}  target={target:#x}  block_target={block_target:#x}  "
+                f"blob_len={len(blob)}  height={height}  "
+                f"from_group={from_group}  to_group={to_group}  "
+                f"has_target={'yes' if target_blob_hex else 'NO — waiting for set_target'}"
+            )
 
             if self.on_job:
                 _t = threading.Thread(target=self.on_job, args=(job,), daemon=True)
