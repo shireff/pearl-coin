@@ -127,10 +127,9 @@ class StratumClient:
 
             self._last_submit_time = now
 
-            # Send full 24-byte nonce with worker name per Alephium Stratum spec:
-            # params: [jobId, nonceSansExtraNonce, workerId?]
-            # Worker is required — pool uses it for share attribution.
-            worker_name = self.worker_name or self.username.split(".")[0] if "." in self.username else self.username
+            # Worker must be the full "wallet.workerName" format for pool attribution.
+            # pool's getWorkerAddress() extracts wallet from prefix or postfix of "wallet.name"
+            worker_name = self.username  # always use full username (wallet.worker)
             nonce_submit = nonce
             self._logger.info(
                 f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1} worker={worker_name}"
