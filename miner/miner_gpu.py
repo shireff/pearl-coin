@@ -620,8 +620,11 @@ class AlephiumMiningSession:
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
-        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")
-        # Verified nonce layout: zeros(16) + extranonce(2) + counter(6)
+        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "sans22")
+        # nonce layout: zeros(16) + extranonce(2) + counter(6) = 24 bytes total
+        # Alephium Stratum spec requires nonceSansExtraNonce:
+        #   sans22 = zeros(16) + counter(6) = 22 bytes (pool prepends extranonce(2))
+        # See: https://docs.alephium.org/mining/alephium-stratum
         # bytes[16:18] = extranonce, bytes[18:24] = counter
         if mode == "sans22":
             # nonceSansExtraNonce: 22 bytes = zeros(16) + counter(6)
