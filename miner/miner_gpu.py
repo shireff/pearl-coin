@@ -433,20 +433,35 @@ class MiningGraphSession:
         self._t_end.record()
         return bool(any_winner)
 
-    def get_last_result(self) -> tuple[bool, Optional[str], Optional[str]]:
-        if not hasattr(self, "_last_hashes") or self._last_hashes is None:
-            return False, None, None
-        flat = self._last_hashes.view(-1, 8)
-        target_cpu = self._target_buf.cpu()
-        winners = (flat <= target_cpu.unsqueeze(0)).all(dim=-1)
-        if not winners.any():
-            return False, None, None
-        idx = int(winners.argmax().item())
-        winner_hash = flat[idx]
-        nonce_bytes = self._last_keys[idx % self.num_jobs].numpy().tobytes()
-        result_hex = bytes(winner_hash.numpy().astype("<I").tobytes()).hex()
-        nonce_hex = nonce_bytes.hex()
-        return True, nonce_hex, result_hex
+    def get_last_result(self) -> tuple[bool, str, str]:
+        if not self._last_found or self._last_nonce < 0:
+            return False, "", ""
+        import os as _os
+        nonce_full_24 = self._last_nonce.to_bytes(24, "big")
+        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "sans22")
+        # Full nonce layout: zeros(16) + extranonce(2) + counter(6)
+        # bytes[16:18] = extranonce, bytes[18:24] = counter
+        if mode == "sans22":
+            # nonceSansExtraNonce: 22 bytes = zeros(16) + counter(6)
+            # Pool prepends extranonce(2) to reconstruct full 24-byte nonce.
+            # extranonce(2) + sans22(22) = 24 bytes total ✓
+            nonce_hex = (nonce_full_24[:16] + nonce_full_24[18:24]).hex()
+        elif mode == "counter6":
+            # 6-byte counter only (bytes[18:24])
+            nonce_hex = nonce_full_24[18:24].hex()
+        elif mode == "uint64_8":
+            # extranonce + counter as uint64 big-endian (8 bytes)
+            nonce_hex = self._last_nonce.to_bytes(8, "big").hex()
+        elif mode == "zeroed24":
+            # full 24 bytes with extranonce bytes zeroed
+            b = bytearray(nonce_full_24)
+            b[16:18] = b"\x00\x00"
+            nonce_hex = bytes(b).hex()
+        else:
+            # full24: canonical 24-byte nonce
+            nonce_hex = nonce_full_24.hex()
+        self._logger.info(f"[submit mode={mode}] nonce_hex={nonce_hex} ({len(nonce_hex)//2} bytes)")
+        return True, nonce_hex, self._last_hash_hex
 
     def build_proof(self, mining_job: MiningJob):
         from pearl_gateway.comm.dataclasses import OpenedBlockInfo
