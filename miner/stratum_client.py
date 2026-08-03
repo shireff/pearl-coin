@@ -135,7 +135,7 @@ class StratumClient:
             self._logger.info(
                 f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1} worker={worker_name}"
             )
-            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit, worker_name])
+            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit, worker_name], use_null_id=True)
             return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
@@ -230,11 +230,14 @@ class StratumClient:
             "[SUGGEST] Waiting for pool to respond with set_difficulty or set_target ..."
         )
 
-    def _send_fire_and_forget(self, method: str, params: list) -> bool:
+    def _send_fire_and_forget(self, method: str, params: list, use_null_id: bool = False) -> bool:
         if not self._sock:
             return False
-        self._job_id_counter += 1
-        request_id = self._job_id_counter
+        if use_null_id:
+            request_id = None
+        else:
+            self._job_id_counter += 1
+            request_id = self._job_id_counter
         request = {"id": request_id, "method": method, "params": params}
         try:
             payload = json.dumps(request) + "\n"
