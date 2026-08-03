@@ -115,16 +115,14 @@ class StratumClient:
             # Using fire-and-forget to avoid blocking _pending_requests for 30s.
             # Any unexpected response will be logged via _handle_response fallback.
             # Official Alephium stratum spec: [jobId, nonceSansExtraNonce, workerId?]
-            worker_id = getattr(self, "_worker_id", "") or ""
-            params = [job_id, nonce, worker_id] if worker_id else [job_id, nonce]
+            params = [job_id, nonce]
             sent = self._send_fire_and_forget("mining.submit", params)
             if sent:
                 self._logger.info(
-                    f"Pool submit sent: job={job_id} "
-                    f"nonce={nonce} ({len(nonce)//2} bytes) "
-                    f"worker_id={worker_id!r}"
+                    f"Pool submit sent: job={job_id} nonce={nonce} ({len(nonce)//2} bytes)"
                 )
             return sent
+
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
