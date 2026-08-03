@@ -115,9 +115,7 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # Rate-limit submits to avoid Kryptex silently disconnecting.
-            # With difficulty=512 and 700 MH/s the miner finds ~1 share/second —
-            # submitting every single one would flood the pool. Cap at 1 per 2s.
+            # Rate-limit submits — pool finds ~1 share/second at difficulty=512
             now = time.time()
             elapsed_since_last = now - self._last_submit_time
             if elapsed_since_last < 2.0:
@@ -125,16 +123,42 @@ class StratumClient:
                     f"Share rate-limited ({elapsed_since_last:.2f}s < 2.0s): "
                     f"job={job_id} nonce={nonce[:16]}..."
                 )
-                return False  # not sent — caller should NOT log as OK
+                return False
+
             self._last_submit_time = now
-            # Kryptex Alephium: params = [jobId, nonce] only — no worker_id appended.
-            params = [job_id, nonce]
-            sent = self._send_fire_and_forget("mining.submit", params)
-            if sent:
-                self._logger.info(
-                    f"Pool submit sent: job={job_id} nonce={nonce} ({len(nonce)//2} bytes)"
+
+            # Alephium Stratum spec: params = [jobId, nonceSansExtraNonce, workerId?]
+            # nonceSansExtraNonce = full 24-byte nonce with 2-byte extranonce removed.
+            # The nonce arg here is full24 (48 hex chars). Strip bytes[16:18] = extranonce.
+            if len(nonce) == 48:
+                # bytes[0:16] + bytes[18:24] → 22 bytes = 44 hex chars
+                nonce_sans = nonce[:32] + nonce[36:]
+            else:
+                nonce_sans = nonce  # unexpected length — send as-is
+
+            params = [job_id, nonce_sans]
+
+            # Use _send_request so we can see pool's result/error response
+            response = self._send_request("mining.submit", params, timeout=10.0)
+            if response is None:
+                self._logger.warning(
+                    f"Pool submit timeout/no-response: job={job_id} nonce_sans={nonce_sans}"
                 )
-            return sent
+                return False
+
+            result_val = response.get("result", False)
+            error = response.get("error")
+            if error:
+                self._logger.warning(
+                    f"Pool submit rejected: job={job_id} error={error} nonce_sans={nonce_sans}"
+                )
+                return False
+
+            self._logger.info(
+                f"Pool submit accepted: job={job_id} result={result_val} "
+                f"nonce={nonce} nonce_sans={nonce_sans}"
+            )
+            return bool(result_val)
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
