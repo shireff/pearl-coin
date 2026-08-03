@@ -127,37 +127,13 @@ class StratumClient:
 
             self._last_submit_time = now
 
-            # Send full 24-byte nonce — E2E test confirmed Kryptex accepts full24.
+            # Send full 24-byte nonce — fire-and-forget (Kryptex may or may not respond).
             nonce_submit = nonce
-
             self._logger.info(
                 f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1}"
             )
-
-            # Use _send_request to capture pool response (result/error).
-            # Kryptex responds to submit with {result: true/false/null, error: ...}
-            response = self._send_request("mining.submit", [job_id, nonce_submit], timeout=5.0)
-            if response is None:
-                # Pool did not respond in 5s — treat as fire-and-forget accepted
-                self._logger.debug(f"Pool submit: no response in 5s (fire-and-forget) job={job_id}")
-                return True
-
-            result_val = response.get("result")
-            error = response.get("error")
-            if error:
-                self._logger.warning(
-                    f"Pool submit REJECTED: job={job_id} error={error} nonce={nonce_submit}"
-                )
-                return False
-
-            accepted = bool(result_val)
-            if accepted:
-                self._logger.info(f"Pool submit ACCEPTED: job={job_id} result={result_val}")
-            else:
-                self._logger.warning(
-                    f"Pool submit NOT ACCEPTED: job={job_id} result={result_val} nonce={nonce_submit}"
-                )
-            return accepted
+            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit])
+            return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
@@ -499,15 +475,19 @@ class StratumClient:
             data_list[0] = message
             event.set()
         else:
-            # Unsolicited response (fire-and-forget submit reply, late response, etc.)
+            # Unsolicited response — could be a submit result from fire-and-forget
             result = message.get("result")
             error = message.get("error")
             method = message.get("method", "")
             if error:
                 self._logger.warning(
-                    f"[Pool unsolicited] id={request_id} method={method!r} error={error}"
+                    f"[Pool response] id={request_id} error={error}"
+                )
+            elif result is not None:
+                self._logger.info(
+                    f"[Pool response] id={request_id} result={str(result)[:120]}"
                 )
             else:
-                self._logger.info(
-                    f"[Pool unsolicited] id={request_id} method={method!r} result={str(result)[:120]}"
+                self._logger.debug(
+                    f"[Pool response] id={request_id} method={method!r} result=null"
                 )
