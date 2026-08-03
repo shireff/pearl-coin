@@ -69,8 +69,16 @@ def alephium_double_blake3(header_blob: bytes, nonce: int) -> bytes:
 
 
 def alephium_chain_index(hash_bytes: bytes) -> int:
-    """Derive the Alephium chain bucket from the final digest byte."""
-    return int(hash_bytes[31]) % 16
+    """Derive the Alephium chain index from the final two digest bytes.
+
+    Pool source (mining-pool/lib/util.js):
+        bigIndex = hash[30] << 8 | hash[31]
+        index    = bigIndex % (GroupSize * GroupSize)  # GroupSize=4 → %16
+        fromGroup = index // GroupSize
+        toGroup   = index % GroupSize
+    """
+    big_index = (int(hash_bytes[30]) << 8) | int(hash_bytes[31])
+    return big_index % 16
 
 
 def alephium_group_valid(hash_bytes: bytes, from_group: int | None, to_group: int | None) -> bool:
@@ -493,6 +501,8 @@ class AlephiumMiningSession:
         self._last_blob_prefix: bytes = b"\x00" * 16
         self._last_blob_bytes: bytes = b"\x00" * 302
         self._last_target_bytes: bytes = b"\xff" * 32
+        self._last_from_group: int | None = None
+        self._last_to_group: int | None = None
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
         # Alephium has 16 chains — height changes every job from a different chain.
@@ -574,11 +584,19 @@ class AlephiumMiningSession:
                 self._last_blob_bytes,
                 self._last_nonce,
             ).hex()
+            self._last_from_group = getattr(job, "from_group", None)
+            self._last_to_group = getattr(job, "to_group", None)
             self._last_chain_ok = alephium_group_valid(
                 bytes.fromhex(self._last_hash_hex),
-                getattr(job, "from_group", None),
-                getattr(job, "to_group", None),
+                self._last_from_group,
+                self._last_to_group,
             )
+            if not self._last_chain_ok:
+                self._logger.debug(
+                    f"[chain-mismatch] winner hash chain≠job chain, skipping: "
+                    f"job=({self._last_from_group},{self._last_to_group}) "
+                    f"hash={self._last_hash_hex[:16]}"
+                )
             # One-time diagnostic: log full blob + nonce + hash for pool verification
             if not getattr(self, "_diag_logged", False):
                 self._diag_logged = True
@@ -618,45 +636,32 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found:
             return False, "", ""
-        # _last_nonce is always unsigned (masked with 0xFFFFFFFFFFFFFFFF in run_round).
-        # The sentinel value 0xFFFFFFFFFFFFFFFF means "not found" from the kernel.
         if self._last_nonce == 0xFFFFFFFFFFFFFFFF:
             self._logger.error(
-                "[get_last_result] _last_found=True but _last_nonce is sentinel 0xFFFFFFFFFFFFFFFF — "
-                "kernel returned no valid nonce"
+                "[get_last_result] sentinel nonce — kernel found nothing"
             )
             return False, "", ""
         if self._last_nonce < 0:
             self._logger.error(
-                f"[get_last_result] _last_nonce={self._last_nonce} is negative — "
-                "sign conversion error in run_round"
+                f"[get_last_result] negative nonce={self._last_nonce}"
+            )
+            return False, "", ""
+
+        # Chain index validation — pool rejects with InvalidBlockChainIndex
+        # if hash's fromGroup/toGroup ≠ job's fromGroup/toGroup.
+        if self._last_hash_hex and not self._last_chain_ok:
+            hash_bytes_check = bytes.fromhex(self._last_hash_hex)
+            bi = (hash_bytes_check[30] << 8 | hash_bytes_check[31]) % 16
+            self._logger.debug(
+                f"[chain-skip] hash chain=({bi//4},{bi%4}) "
+                f"job=({self._last_from_group},{self._last_to_group}) — discarding"
             )
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
         mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")
-        # nonce uint64 layout (big-endian in 24 bytes):
-        #   bytes[0:16]  = zeros (padding)
-        #   bytes[16]    = 0x00 (high byte of uint64, always zero since extranonce <= 0xFFFF)
-        #   bytes[17:19] = extranonce (2 bytes) — from extranonce_val << 48 >> 40
-        #   bytes[19:24] = counter (5 bytes low bits)
-        #
-        # Wait — extranonce_val << 48 means:
-        #   uint64 high byte (byte[0] of 8-byte BE) = extranonce_high = 0x00
-        #   uint64 byte[1] = extranonce byte[0]
-        #   uint64 byte[2] = extranonce byte[1]
-        #   uint64 bytes[3:8] = counter (5 bytes)
-        #
-        # In 24-byte representation:
-        #   bytes[16:24] = uint64 big-endian
-        #   bytes[16]    = 0x00
-        #   bytes[17:19] = extranonce (2 bytes)
-        #   bytes[19:24] = counter (5 bytes)
-        #
-        # Alephium nonceSansExtraNonce = 22 bytes without the 2-byte extranonce:
-        #   = bytes[0:17] + bytes[19:24]  = 17 zeros + 5-byte counter
-        # See: https://docs.alephium.org/mining/alephium-stratum
-        # bytes[16:18] = extranonce, bytes[18:24] = counter
+        # Layout: zeros(16) + extranonce(2) + counter(6) = 24 bytes
+        # Pool verifies: blake3(blake3(nonce24 + headerBlob)) per blockTemplate.hash()
         if mode == "sans22":
             # nonceSansExtraNonce: the pool knows the extranonce it assigned.
             # We submit the full 24-byte nonce with extranonce bytes zeroed out.
