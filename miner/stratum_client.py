@@ -114,7 +114,8 @@ class StratumClient:
             # Alephium stratum: [jobId, nonceSansExtraNonce]
             # Use threaded _send_request so we can log pool accept/reject.
             # Mining loop is not blocked — ack happens in a background thread.
-            params = [job_id, nonce]
+            # Kryptex uses object-based params in mining.notify — try same for submit
+            params = [{"jobId": job_id, "nonce": nonce}]
             _logger = self._logger
 
             def _await_ack():
