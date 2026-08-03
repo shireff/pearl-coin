@@ -613,14 +613,26 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Alephium stratum protocol: submit nonceSansExtraNonce only.
-        # The pool already knows the extranonce (from set_extranonce) and
-        # prepends it when verifying. We must send only the 6-byte counter
-        # (lower 48 bits), not the full 24-byte nonce.
-        # Full nonce: zeros(16) + extranonce(2) + counter(6)
-        # Submit:     counter(6) = nonce & 0xFFFFFFFFFFFF
-        nonce_sans_extranonce = self._last_nonce & 0xFFFFFFFFFFFF
-        nonce_hex = nonce_sans_extranonce.to_bytes(6, "big").hex()
+        import os as _os
+        nonce_full_24 = self._last_nonce.to_bytes(24, "big")
+        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "counter6")
+        # Full nonce layout: zeros(16) + extranonce(2) + counter(6)
+        # bytes[16:18] = extranonce, bytes[18:24] = counter
+        if mode == "counter6":
+            # nonceSansExtraNonce: 6-byte counter only (bytes[18:24])
+            nonce_hex = nonce_full_24[18:24].hex()
+        elif mode == "uint64_8":
+            # extranonce + counter as uint64 big-endian (8 bytes)
+            nonce_hex = self._last_nonce.to_bytes(8, "big").hex()
+        elif mode == "zeroed24":
+            # full 24 bytes with extranonce bytes zeroed
+            b = bytearray(nonce_full_24)
+            b[16:18] = b"\x00\x00"
+            nonce_hex = bytes(b).hex()
+        else:
+            # full24: canonical 24-byte nonce
+            nonce_hex = nonce_full_24.hex()
+        self._logger.info(f"[submit mode={mode}] nonce_hex={nonce_hex}")
         return True, nonce_hex, self._last_hash_hex
 
     def close(self) -> None:
