@@ -46,11 +46,11 @@ class StratumClient:
         self._current_job: Optional[StratumJob] = None
         self._worker_id = ""
         self._extranonce1 = ""
-        # Pool share target — set only via set_target or set_difficulty.
-        # When None, targetBlob from mining.notify is used directly as share target.
-        # Kryptex Alephium sends the actual pool share target in targetBlob.
-        # Default difficulty=512 (Kryptex Alephium default) — updated by set_difficulty
-        self._share_target: Optional[int] = None
+        # Pool share target — default only for Alephium if no difficulty/target
+        # update has arrived before the first mining.notify.
+        self._share_target: Optional[int] = (
+            int((2**256 - 1) // 512) if self.algorithm == "alephium" else None
+        )
         self._difficulty_received = threading.Event()
         self._job_id_counter = 0
         self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
@@ -358,9 +358,14 @@ class StratumClient:
             with self._lock:
                 self._current_job = job
 
-            self._logger.info(
-                f"New job: id={job_id} target={target:#x} blob_len={len(blob)} height={height}"
-            )
+            if share_target is not None and share_target != block_target:
+                self._logger.info(
+                    f"New job: id={job_id} target={target:#x} block_target={block_target:#x} (using share target) blob_len={len(blob)} height={height}"
+                )
+            else:
+                self._logger.info(
+                    f"New job: id={job_id} target={target:#x} blob_len={len(blob)} height={height}"
+                )
 
             if self.on_job:
                 _t = threading.Thread(target=self.on_job, args=(job,), daemon=True)
