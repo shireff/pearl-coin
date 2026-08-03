@@ -21,6 +21,7 @@ class PoolMiningJob:
     extranonce: str = ""  # pool extranonce from mining.set_extranonce
     from_group: Optional[int] = None
     to_group: Optional[int] = None
+    block_target: int = 0  # targetBlob from pool — pool validates hash <= this
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -217,6 +218,7 @@ class PoolMiningClient:
                 extranonce=extranonce,
                 from_group=from_group,
                 to_group=to_group,
+                block_target=stratum_job.block_target,
             )
             # Keep per-chain job map so we can find the right job for any winning hash
             if from_group is not None and to_group is not None:
