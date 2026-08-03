@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 
 from miner_utils import get_logger
 
+
 @dataclass
 class StratumJob:
     job_id: str
@@ -20,6 +21,7 @@ class StratumJob:
     extranonce2_size: int = 4
     difficulty: float = 1.0
     block_target: int = 0  # original block target from targetBlob
+
 
 class StratumClient:
     def __init__(
@@ -46,10 +48,9 @@ class StratumClient:
         self._current_job: Optional[StratumJob] = None
         self._worker_id = ""
         self._extranonce1 = ""
-        # Pool share target — default only for Alephium if no difficulty/target
-        # update has arrived before the first mining.notify.
+        # Pool share target — default difficulty=512 for Alephium (Kryptex default)
         self._share_target: Optional[int] = (
-            int((2**256 - 1) // 512) if self.algorithm == "alephium" else None
+            int((2**256 - 1) // 512) if algorithm == "alephium" else None
         )
         self._difficulty_received = threading.Event()
         self._job_id_counter = 0
@@ -114,27 +115,16 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # Kryptex Alephium pool does NOT respond to mining.submit.
-            # Using fire-and-forget to avoid blocking _pending_requests for 30s.
-            # Any unexpected response will be logged via _handle_response fallback.
-            # Official Alephium stratum spec: [jobId, nonceSansExtraNonce, workerId?]
-            # Some pools use the worker/session id returned by mining.subscribe or
-            # mining.authorize to attribute the share to the correct worker.
+            # Kryptex Alephium: fire-and-forget, pool does not respond to submit
             params = [job_id, nonce]
             if self._worker_id:
                 params.append(self._worker_id)
-            if self._worker_id:
-                self._logger.debug(f"Alephium mining.submit worker_id={self._worker_id}")
-            else:
-                self._logger.warning("Alephium mining.submit has no worker_id available")
-            self._logger.debug(f"Alephium mining.submit params: {params}")
             sent = self._send_fire_and_forget("mining.submit", params)
             if sent:
                 self._logger.info(
                     f"Pool submit sent: job={job_id} nonce={nonce} ({len(nonce)//2} bytes)"
                 )
             return sent
-
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
@@ -151,41 +141,41 @@ class StratumClient:
             self._logger.info(f"Pool submit response: result={result_val}")
         return result_val is True
 
-def _subscribe_and_authorize(self) -> bool:
-    subscribe_response = self._send_request("mining.subscribe", [])
-    if subscribe_response is None or not subscribe_response.get("result"):
-        self._logger.error("Failed to subscribe to pool")
-        return False
+    def _subscribe_and_authorize(self) -> bool:
+        subscribe_response = self._send_request("mining.subscribe", [])
+        if subscribe_response is None or not subscribe_response.get("result"):
+            self._logger.error("Failed to subscribe to pool")
+            return False
 
-    self._subscribed = True
-    result = subscribe_response["result"]
-    if isinstance(result, list) and len(result) > 1:
-        extranonce = result[1]
-        if isinstance(extranonce, list) and len(extranonce) > 0:
-            self._extranonce1 = str(extranonce[0])
-        else:
-            self._extranonce1 = str(extranonce)
-    elif isinstance(result, str) and result:
-        # Kryptex Alephium: subscribe result is the session/worker id (e.g. "00000000")
-        self._worker_id = str(result).strip()
-        self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
+        self._subscribed = True
+        result = subscribe_response["result"]
+        if isinstance(result, list) and len(result) > 1:
+            extranonce = result[1]
+            if isinstance(extranonce, list) and len(extranonce) > 0:
+                self._extranonce1 = str(extranonce[0])
+            else:
+                self._extranonce1 = str(extranonce)
+        elif isinstance(result, str) and result:
+            # Kryptex Alephium: subscribe result is the session/worker id
+            self._worker_id = str(result).strip()
+            self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
 
-    authorize_response = self._send_request(
-        "mining.authorize", [self.username, self.password]
-    )
-    if authorize_response is None or not authorize_response.get("result"):
-        self._logger.error(f"Failed to authorize with pool: {self.username}")
-        return False
+        authorize_response = self._send_request(
+            "mining.authorize", [self.username, self.password]
+        )
+        if authorize_response is None or not authorize_response.get("result"):
+            self._logger.error(f"Failed to authorize with pool: {self.username}")
+            return False
 
-    auth_result = authorize_response.get("result")
-    if isinstance(auth_result, str) and auth_result:
-        self._worker_id = str(auth_result).strip()
-    elif isinstance(auth_result, bool):
-        self._worker_id = self._worker_id or ""
-    elif not self._worker_id:
-        self._worker_id = ""
-    self._authorized = True
-    return True
+        auth_result = authorize_response.get("result")
+        if isinstance(auth_result, str) and auth_result:
+            self._worker_id = str(auth_result).strip()
+        elif isinstance(auth_result, bool):
+            self._worker_id = self._worker_id or ""
+        elif not self._worker_id:
+            self._worker_id = ""
+        self._authorized = True
+        return True
 
     def _send_fire_and_forget(self, method: str, params: list) -> bool:
         if not self._sock:
@@ -321,9 +311,6 @@ def _subscribe_and_authorize(self) -> bool:
             blob = bytes.fromhex(header_blob_hex)
             block_target = int(target_blob_hex, 16)
 
-            # Use _share_target if set via set_target/set_difficulty,
-            # otherwise use targetBlob directly — Kryptex embeds the pool
-            # share target in targetBlob, so this is the correct default.
             with self._lock:
                 share_target = self._share_target
             target = share_target if share_target is not None else block_target
@@ -342,7 +329,7 @@ def _subscribe_and_authorize(self) -> bool:
 
             if share_target is not None and share_target != block_target:
                 self._logger.info(
-                    f"New job: id={job_id} target={target:#x} block_target={block_target:#x} (using share target) blob_len={len(blob)} height={height}"
+                    f"New job: id={job_id} share_target={target:#x} block_target={block_target:#x} blob_len={len(blob)} height={height}"
                 )
             else:
                 self._logger.info(
@@ -360,8 +347,6 @@ def _subscribe_and_authorize(self) -> bool:
             if params and len(params) > 0:
                 difficulty = float(params[0])
                 if difficulty > 0:
-                    # Verified: share_target = (2^256-1) / difficulty
-                    # difficulty=512 → 007fffff... → 197 valid per 100k ✓
                     share_target = int((2**256 - 1) // difficulty)
                 else:
                     share_target = 2**256 - 1
