@@ -503,6 +503,7 @@ class AlephiumMiningSession:
         self._last_target_bytes: bytes = b"\xff" * 32
         self._last_from_group: int | None = None
         self._last_to_group: int | None = None
+        self._last_block_target: int = 0
 
     def run_round(self, job: PoolMiningJob) -> tuple[bool, int]:
         # Alephium has 16 chains — height changes every job from a different chain.
@@ -586,6 +587,8 @@ class AlephiumMiningSession:
             ).hex()
             self._last_from_group = getattr(job, "from_group", None)
             self._last_to_group = getattr(job, "to_group", None)
+            # Store block_target (targetBlob) for pool validation in get_last_result
+            self._last_block_target = getattr(job, "block_target", 0)
             self._last_chain_ok = alephium_group_valid(
                 bytes.fromhex(self._last_hash_hex),
                 self._last_from_group,
@@ -657,6 +660,16 @@ class AlephiumMiningSession:
                 f"job=({self._last_from_group},{self._last_to_group}) — discarding"
             )
             return False, "", ""
+        # Block target check — pool verifies hash <= targetBlob.
+        # share_target (set_difficulty) is easier and only used for GPU speed.
+        if self._last_hash_hex:
+            hash_int = int(self._last_hash_hex, 16)
+            block_target = getattr(self, "_last_block_target", 0)
+            if block_target and hash_int > block_target:
+                self._logger.debug(
+                    f"[block-target-skip] hash > targetBlob — pool would reject"
+                )
+                return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
         mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")

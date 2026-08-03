@@ -370,25 +370,21 @@ class StratumClient:
 
             blob = bytes.fromhex(header_blob_hex)
 
-            # targetBlob is the actual target the pool verifies against.
-            # set_difficulty/set_target gives us the SHARE target (easier) for rate control,
-            # but the pool's processShare validates: hash(nonce+blob) <= targetBlob.
-            # We must mine against targetBlob so our submitted shares pass pool verification.
             if target_blob_hex:
                 block_target = int(target_blob_hex, 16)
             else:
                 block_target = 0
 
-            # Use targetBlob as the primary mining target if available.
-            # Fall back to share_target only when targetBlob is absent.
             with self._lock:
                 share_target = self._share_target
 
-            if block_target:
-                # targetBlob present — mine against it directly (pool verifies this)
-                target = block_target
-            elif share_target is not None:
-                target = share_target
+            # GPU mines against share_target (easy, from set_difficulty) to find candidates fast.
+            # Before submitting, get_last_result verifies hash <= block_target (targetBlob).
+            # Pool processShare validates hash <= job.target = targetBlob.
+            if share_target is not None:
+                target = share_target       # use easy share target for GPU speed
+            elif block_target:
+                target = block_target       # fallback: mine directly against block target
             else:
                 target = 2**256 - 1
                 self._logger.warning(
