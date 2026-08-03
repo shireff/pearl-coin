@@ -1,0 +1,7 @@
+strings /tmp/miner_live.log | grep -E "New job.*target|Pool set diff" | tail -20
+
+strings /tmp/miner_live.log | grep "GPU round time" | tail -5
+
+strings /tmp/miner_live.log | grep "WINNER" | wc -l
+
+strings /tmp/miner_live.log | grep -E "WINNER|submit sent" | tail -5
