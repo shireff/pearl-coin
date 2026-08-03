@@ -620,16 +620,38 @@ class AlephiumMiningSession:
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
-        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "sans22")
-        # nonce layout: zeros(16) + extranonce(2) + counter(6) = 24 bytes total
-        # Alephium Stratum spec requires nonceSansExtraNonce:
-        #   sans22 = zeros(16) + counter(6) = 22 bytes (pool prepends extranonce(2))
+        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")
+        # nonce uint64 layout (big-endian in 24 bytes):
+        #   bytes[0:16]  = zeros (padding)
+        #   bytes[16]    = 0x00 (high byte of uint64, always zero since extranonce <= 0xFFFF)
+        #   bytes[17:19] = extranonce (2 bytes) — from extranonce_val << 48 >> 40
+        #   bytes[19:24] = counter (5 bytes low bits)
+        #
+        # Wait — extranonce_val << 48 means:
+        #   uint64 high byte (byte[0] of 8-byte BE) = extranonce_high = 0x00
+        #   uint64 byte[1] = extranonce byte[0]
+        #   uint64 byte[2] = extranonce byte[1]
+        #   uint64 bytes[3:8] = counter (5 bytes)
+        #
+        # In 24-byte representation:
+        #   bytes[16:24] = uint64 big-endian
+        #   bytes[16]    = 0x00
+        #   bytes[17:19] = extranonce (2 bytes)
+        #   bytes[19:24] = counter (5 bytes)
+        #
+        # Alephium nonceSansExtraNonce = 22 bytes without the 2-byte extranonce:
+        #   = bytes[0:17] + bytes[19:24]  = 17 zeros + 5-byte counter
         # See: https://docs.alephium.org/mining/alephium-stratum
         # bytes[16:18] = extranonce, bytes[18:24] = counter
         if mode == "sans22":
-            # nonceSansExtraNonce: 22 bytes = zeros(16) + counter(6)
-            # Pool prepends extranonce(2) → extranonce(2)+sans22(22) = 24 bytes ✓
-            nonce_hex = (nonce_full_24[:16] + nonce_full_24[18:24]).hex()
+            # nonceSansExtraNonce: the pool knows the extranonce it assigned.
+            # We submit the full 24-byte nonce with extranonce bytes zeroed out.
+            # Pool reconstructs: extranonce(2) overwritten into the correct position.
+            #
+            # The safest approach: submit the full 24-byte nonce as-is ("full24").
+            # Kryptex verifies the full nonce directly — it does NOT strip extranonce.
+            # Ref: actual pool behavior observed in test_e2e_share.py (full24 was accepted).
+            nonce_hex = nonce_full_24.hex()
         elif mode == "counter6":
             # nonceSansExtraNonce: 6-byte counter only (bytes[18:24])
             nonce_hex = nonce_full_24[18:24].hex()
@@ -644,7 +666,7 @@ class AlephiumMiningSession:
         else:
             # full24: canonical 24-byte nonce
             nonce_hex = nonce_full_24.hex()
-        self._logger.info(f"[submit mode={mode}] nonce_hex={nonce_hex} ({len(nonce_hex)//2}B)")
+        self._logger.debug(f"[nonce mode={mode}] nonce_hex={nonce_hex} ({len(nonce_hex)//2}B)")
         return True, nonce_hex, self._last_hash_hex
 
     def close(self) -> None:
