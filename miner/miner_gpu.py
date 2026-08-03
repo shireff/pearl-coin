@@ -660,16 +660,6 @@ class AlephiumMiningSession:
                 f"job=({self._last_from_group},{self._last_to_group}) — discarding"
             )
             return False, "", ""
-        # Block target check — pool verifies hash <= targetBlob.
-        # share_target (set_difficulty) is easier and only used for GPU speed.
-        if self._last_hash_hex:
-            hash_int = int(self._last_hash_hex, 16)
-            block_target = getattr(self, "_last_block_target", 0)
-            if block_target and hash_int > block_target:
-                self._logger.debug(
-                    f"[block-target-skip] hash > targetBlob — pool would reject"
-                )
-                return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
         mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")
