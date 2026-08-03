@@ -165,6 +165,18 @@ class StratumClient:
         return result_val is True
 
     def _subscribe_and_authorize(self) -> bool:
+        # Alephium stratum spec requires mining.hello as first handshake step.
+        # Some pools ignore it, but Kryptex may require it to register the session.
+        if self.algorithm == "alephium":
+            hello_response = self._send_request(
+                "mining.hello", ["pearl-miner/1.0.0", "AlephiumStratum/1.0.0"],
+                timeout=5.0
+            )
+            if hello_response is None:
+                self._logger.warning("mining.hello: no response (pool may not require it)")
+            else:
+                self._logger.info(f"mining.hello response: {hello_response}")
+
         subscribe_response = self._send_request("mining.subscribe", [])
         if subscribe_response is None or not subscribe_response.get("result"):
             self._logger.error("Failed to subscribe to pool")
