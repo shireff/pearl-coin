@@ -159,6 +159,11 @@ class StratumClient:
                 f"extranonce={self._extranonce1}"
             )
 
+            # Log the exact JSON being sent for debugging
+            import json as _json
+            _payload = _json.dumps({"id": "?", "method": "mining.submit", "params": [job_id, nonce_sans]})
+            self._logger.info(f"[STRATUM SEND mining.submit] {_payload}")
+
             # Kryptex Alephium: fire-and-forget — pool does NOT send response to submit.
             # Using _send_request causes 10s timeout on every share.
             sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_sans])
