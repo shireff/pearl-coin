@@ -90,4 +90,37 @@ if found3 and (nonce3 & 0xFFFFFFFFFFFFFFFF) == 0:
 else:
     print("  OK: nonce=0 correctly rejected (or different nonce found)")
 
+
+# ── Step 6: simulate exact mining loop with real pool target ──────────────────
+print(f"\n[TEST5] simulate real mining loop with Kryptex target")
+# Real target from pool logs: 0x1ffffffffffffffffffffffffffffffffffffffffffffffffffffff
+pool_target = 0x1ffffffffffffffffffffffffffffffffffffffffffffffffffffff
+pool_target_bytes = pool_target.to_bytes(32, "big")
+print(f"  pool_target bytes={pool_target_bytes.hex()}")
+print(f"  pool_target word[0] big-endian={int.from_bytes(pool_target_bytes[0:4],'big'):#010x}")
+
+# Simulate AlephiumMiningSession.run_round target loading
+target_gpu2 = torch.empty(32, dtype=torch.uint8, device="cuda")
+target_gpu2.copy_(torch.frombuffer(pool_target_bytes, dtype=torch.uint8))
+
+# Use a real blob (302 zeros) and base_nonce from logs: 0x63b6000a61000000
+base_nonce_real = 0x63b6000a61000000
+_base_nonce_signed = base_nonce_real if base_nonce_real < (1 << 63) else base_nonce_real - (1 << 64)
+
+print(f"  base_nonce={base_nonce_real:#018x}  signed={_base_nonce_signed}")
+found5, nonce5 = alph_mine_batch(blob_gpu, _base_nonce_signed, 16777216, target_gpu2)
+print(f"  found={found5}  nonce={nonce5}")
+if not found5:
+    print("  *** BUG: pool target should be easy but kernel found nothing ***")
+    print("  Checking: what is the probability?")
+    prob = pool_target / (2**256)
+    expected_per_16m = prob * 16777216
+    print(f"  pool_target / 2^256 = {prob:.6e}")
+    print(f"  expected winners per 16M nonces = {expected_per_16m:.1f}")
+else:
+    py_hash5 = py_double_blake3(nonce5 & 0xFFFFFFFFFFFFFFFF, BLOB)
+    hash5_int = int.from_bytes(py_hash5, "big")
+    print(f"  hash={py_hash5.hex()}")
+    print(f"  hash <= pool_target: {hash5_int <= pool_target}")
+
 print("\nDone.")
