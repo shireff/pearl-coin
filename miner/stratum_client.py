@@ -112,12 +112,42 @@ class StratumClient:
 
         if self.algorithm == "alephium":
             # Alephium stratum: [jobId, nonceSansExtraNonce]
-            # No worker_id in params — pool identifies worker from connection.
+            # Use threaded _send_request so we can log pool accept/reject.
+            # Mining loop is not blocked — ack happens in a background thread.
             params = [job_id, nonce]
-            sent = self._send_fire_and_forget("mining.submit", params)
-            if sent:
-                self._logger.info(f"Pool submit sent (fire-and-forget): job={job_id} nonce={nonce}...")
-            return sent
+            _logger = self._logger
+
+            def _await_ack():
+                response = self._send_request("mining.submit", params, timeout=30.0)
+                if response is None:
+                    _logger.warning(
+                        f"Pool submit TIMEOUT (no response in 30s): "
+                        f"job={job_id} nonce={nonce[:20]}..."
+                    )
+                    return
+                result_val = response.get("result", False)
+                error = response.get("error")
+                if error:
+                    _logger.warning(
+                        f"Pool REJECTED share: job={job_id} nonce={nonce[:20]}... "
+                        f"error={error}"
+                    )
+                elif result_val is True:
+                    _logger.info(
+                        f"Pool ACCEPTED share ✓: job={job_id} nonce={nonce[:20]}..."
+                    )
+                else:
+                    _logger.warning(
+                        f"Pool share result=false: job={job_id} nonce={nonce[:20]}... "
+                        f"raw={response}"
+                    )
+
+            threading.Thread(target=_await_ack, daemon=True).start()
+            self._logger.info(
+                f"Pool submit sent (awaiting ack): job={job_id} nonce={nonce[:20]}... "
+                f"len={len(nonce)} chars = {len(nonce)//2} bytes"
+            )
+            return True
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
