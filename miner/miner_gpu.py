@@ -843,25 +843,41 @@ def main():
         total_elapsed = 0.0
 
         _current_job = None
+        _job_cycle_idx = 0  # round-robin index into job_map for Alephium
 
         while True:
             try:
-                # Non-blocking: drain queue and take the latest job only.
-                # For Alephium the pool sends a new job_id every ~1s even when
-                # the block height has not changed — draining prevents stale-job
-                # accumulation and avoids resetting base_nonce on every round.
-                try:
-                    latest = _job_queue.get_nowait()
-                    while True:
+                # For Alephium: cycle through all available chain jobs in round-robin.
+                # The pool sends one job per chain (up to 16 chains). By rotating
+                # through them, each round mines a different chain so the winner's
+                # chain will naturally match the current job.
+                if pool_mode and pool_algorithm == "alephium" and isinstance(_client_ref[0], PoolMiningClient):
+                    with _client_ref[0]._job_lock:
+                        all_jobs = list(_client_ref[0]._job_map.values())
+                    if all_jobs:
+                        _job_cycle_idx = _job_cycle_idx % len(all_jobs)
+                        _current_job = all_jobs[_job_cycle_idx]
+                        _job_cycle_idx += 1
+                    else:
+                        # No jobs in map yet — fall back to queue
                         try:
-                            latest = _job_queue.get_nowait()
+                            _current_job = _job_queue.get_nowait()
                         except _queue.Empty:
-                            break
-                    _current_job = latest
-                except _queue.Empty:
-                    if _current_job is None:
-                        # No job yet — block until first job arrives
-                        _current_job = _job_queue.get(timeout=5.0)
+                            if _current_job is None:
+                                _current_job = _job_queue.get(timeout=5.0)
+                else:
+                    # Non-blocking: drain queue and take the latest job only.
+                    try:
+                        latest = _job_queue.get_nowait()
+                        while True:
+                            try:
+                                latest = _job_queue.get_nowait()
+                            except _queue.Empty:
+                                break
+                        _current_job = latest
+                    except _queue.Empty:
+                        if _current_job is None:
+                            _current_job = _job_queue.get(timeout=5.0)
 
                 mining_job = _current_job
                 if isinstance(session, AlephiumMiningSession):
@@ -891,28 +907,7 @@ def main():
                 if won:
                     if pool_mode:
                         ok, nonce_hex, result_hex = session.get_last_result()
-                        logger.info(
-                            f"[WINNER] GPU found candidate  ok={ok}  "
-                            f"nonce_hex={nonce_hex}  "
-                            f"nonce_len={len(nonce_hex)//2 if nonce_hex else 0}B  "
-                            f"hash={result_hex[:64] if result_hex else '<empty>'}  "
-                            f"job_id={getattr(mining_job, 'job_id', '?')}  "
-                            f"target={getattr(mining_job, 'target', '?'):#x}"
-                        )
-                        if not ok:
-                            logger.error(
-                                "[WINNER→SKIP] get_last_result returned ok=False — "
-                                f"_last_found={session._last_found}  "
-                                f"_last_nonce={session._last_nonce}  "
-                                f"_last_hash={session._last_hash_hex[:32] if session._last_hash_hex else '<empty>'}  "
-                                f"chain_ok={session._last_chain_ok}"
-                            )
-                        elif not nonce_hex:
-                            logger.error(
-                                "[WINNER→SKIP] nonce_hex is empty after get_last_result  "
-                                f"_last_nonce={session._last_nonce}  mode={__import__('os').environ.get('PEARL_NONCE_SUBMIT_MODE','full24')}"
-                            )
-                        else:
+                        if ok and nonce_hex:
                             job_id = getattr(mining_job, "job_id", "")
                             success = _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
                             if success:
@@ -921,9 +916,18 @@ def main():
                                     f"nonce={nonce_hex}"
                                 )
                             else:
-                                logger.debug(
-                                    f"[SUBMIT SKIP] Rate-limited or failed  job_id={job_id}"
-                                )
+                                logger.debug(f"[SUBMIT SKIP] Rate-limited  job_id={job_id}")
+                        else:
+                            # chain_ok=False — the hash chain doesn't match this job.
+                            # The nonce is valid (hash<=target) but for a different chain.
+                            # We cannot submit it against a different job's blob —
+                            # the pool recomputes hash(nonce + THIS_JOB_blob) and it won't match.
+                            # The only correct action is to keep mining and wait for a
+                            # winner whose chain matches the current job.
+                            logger.debug(
+                                f"[chain-skip] winner on wrong chain for job "
+                                f"({session._last_from_group},{session._last_to_group})"
+                            )
                     else:
                         plain_proof = session.build_proof(mining_job)
                         _client_ref[0].submit_plain_proof(plain_proof, mining_job)

@@ -50,6 +50,7 @@ class PoolMiningClient:
         self.algorithm = algorithm
         self._stratum: Optional[StratumClient] = None
         self._current_job: Optional[PoolMiningJob] = None
+        self._job_map: dict[tuple[int, int], PoolMiningJob] = {}  # (from_group, to_group) → job
         self._job_lock = threading.Lock()
         self._logger = get_logger(__name__)
         self._connected = False
@@ -90,6 +91,7 @@ class PoolMiningClient:
             self._stratum = None
         with self._job_lock:
             self._current_job = None
+            self._job_map.clear()
 
     def is_connected(self) -> bool:
         return self._connected and self._stratum is not None and self._stratum.is_connected()
@@ -99,6 +101,11 @@ class PoolMiningClient:
             if self._current_job is None:
                 raise RuntimeError("No mining job available from pool")
             return self._current_job
+
+    def get_job_for_chain(self, from_group: int, to_group: int) -> Optional[PoolMiningJob]:
+        """Return the most recent job for a specific chain combination, or None."""
+        with self._job_lock:
+            return self._job_map.get((from_group, to_group))
 
     def submit_plain_proof(self, nonce: str, result_hex: str, job_id: str = "") -> bool:
         if not self.is_connected() or not self._stratum:
@@ -211,3 +218,6 @@ class PoolMiningClient:
                 from_group=from_group,
                 to_group=to_group,
             )
+            # Keep per-chain job map so we can find the right job for any winning hash
+            if from_group is not None and to_group is not None:
+                self._job_map[(from_group, to_group)] = self._current_job
