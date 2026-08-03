@@ -138,13 +138,12 @@ class PoolMiningClient:
 
         if success:
             self._logger.info(
-                f"[SUBMIT OK] Share accepted by pool  job_id={target_job_id}  nonce={nonce_preview}"
+                f"[SUBMIT OK] Share sent to pool  job_id={target_job_id}  nonce={nonce_preview}"
             )
         else:
             self._logger.warning(
-                f"[SUBMIT REJECTED] Pool rejected share  job_id={target_job_id}  "
-                f"nonce={nonce_preview}  nonce_len={len(nonce)//2}B  "
-                f"result={result_hex[:32] if result_hex else '<empty>'}"
+                f"[SUBMIT SKIP/FAIL] job_id={target_job_id}  nonce={nonce_preview}  "
+                f"(rate-limited or send error)"
             )
 
         return success

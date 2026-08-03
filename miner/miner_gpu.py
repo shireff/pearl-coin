@@ -873,14 +873,12 @@ def main():
                             success = _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
                             if success:
                                 logger.info(
-                                    f"[SUBMIT OK] job_id={job_id}  nonce={nonce_hex[:32]}  "
-                                    f"hash={result_hex[:32] if result_hex else '<empty>'}"
+                                    f"[SUBMIT OK] Pool received share  job_id={job_id}  "
+                                    f"nonce={nonce_hex}"
                                 )
                             else:
-                                logger.warning(
-                                    f"[SUBMIT FAIL] Pool rejected or error  job_id={job_id}  "
-                                    f"nonce={nonce_hex[:32]}  nonce_len={len(nonce_hex)//2}B  "
-                                    f"connected={_client_ref[0].is_connected()}"
+                                logger.debug(
+                                    f"[SUBMIT SKIP] Rate-limited or failed  job_id={job_id}"
                                 )
                     else:
                         plain_proof = session.build_proof(mining_job)
