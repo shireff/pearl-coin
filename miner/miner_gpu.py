@@ -433,21 +433,21 @@ class MiningGraphSession:
         self._t_end.record()
         return bool(any_winner)
 
-    def get_last_result(self) -> tuple[bool, str, str]:
+        def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
         mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "sans22")
-        # Full nonce layout: zeros(16) + extranonce(2) + counter(6)
-        # bytes[16:18] = extranonce, bytes[18:24] = counter
+        # Verified nonce layout: zeros(16) + extranonce(2) + counter(6)
+        # bytes[16:18] = extranonce  ← confirmed by python3 test
+        # bytes[18:24] = counter
         if mode == "sans22":
             # nonceSansExtraNonce: 22 bytes = zeros(16) + counter(6)
-            # Pool prepends extranonce(2) to reconstruct full 24-byte nonce.
-            # extranonce(2) + sans22(22) = 24 bytes total ✓
+            # Pool prepends extranonce(2) → extranonce(2)+sans22(22) = 24 bytes ✓
             nonce_hex = (nonce_full_24[:16] + nonce_full_24[18:24]).hex()
         elif mode == "counter6":
-            # 6-byte counter only (bytes[18:24])
+            # 6-byte counter only — missing the 16 leading zeros
             nonce_hex = nonce_full_24[18:24].hex()
         elif mode == "uint64_8":
             # extranonce + counter as uint64 big-endian (8 bytes)
@@ -460,7 +460,7 @@ class MiningGraphSession:
         else:
             # full24: canonical 24-byte nonce
             nonce_hex = nonce_full_24.hex()
-        self._logger.info(f"[submit mode={mode}] nonce_hex={nonce_hex} ({len(nonce_hex)//2} bytes)")
+        self._logger.info(f"[submit mode={mode}] nonce_hex={nonce_hex} ({len(nonce_hex)//2}B)")
         return True, nonce_hex, self._last_hash_hex
 
     def build_proof(self, mining_job: MiningJob):
