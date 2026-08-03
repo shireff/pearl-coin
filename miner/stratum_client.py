@@ -127,12 +127,15 @@ class StratumClient:
 
             self._last_submit_time = now
 
-            # Send full 24-byte nonce — fire-and-forget (Kryptex may or may not respond).
+            # Send full 24-byte nonce with worker name per Alephium Stratum spec:
+            # params: [jobId, nonceSansExtraNonce, workerId?]
+            # Worker is required — pool uses it for share attribution.
+            worker_name = self.worker_name or self.username.split(".")[0] if "." in self.username else self.username
             nonce_submit = nonce
             self._logger.info(
-                f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1}"
+                f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1} worker={worker_name}"
             )
-            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit])
+            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit, worker_name])
             return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
