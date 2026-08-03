@@ -209,6 +209,13 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
         hash_bytes = py_double_blake3(nonce_int, blob_bytes)
         hash_int   = int.from_bytes(hash_bytes, "big")
 
+        # ── Chain index validation against pool source (util.js blockChainIndex) ──
+        bi = (hash_bytes[30] << 8 | hash_bytes[31]) % 16
+        hash_from_group = bi // 4
+        hash_to_group   = bi % 4
+        job_from_group  = getattr(job, "_from_group", None)
+        job_to_group    = getattr(job, "_to_group", None)
+
         print(f"\n{INFO} Candidate found!")
         print(f"  round={rounds}  MH/s={mhs:.1f}")
         print(f"  nonce_int={nonce_int:#018x}")
@@ -216,12 +223,18 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
         print(f"  hash={hash_bytes.hex()}")
         print(f"  target={job.target:#x}")
         print(f"  hash <= target: {hash_int <= job.target}")
+        print(f"  chain: hash=({hash_from_group},{hash_to_group})  job=({job_from_group},{job_to_group})")
 
         if hash_int > job.target:
-            print(f"{WARN} Python verification FAILED: hash > target  "
-                  "(kernel comparison wrong or different blob)")
-            # Don't submit — keep mining
+            print(f"{WARN} Python verification FAILED: hash > target — skipping")
             continue
+
+        # Chain index must match job — pool rejects with InvalidBlockChainIndex otherwise
+        if job_from_group is not None and job_to_group is not None:
+            if hash_from_group != job_from_group or hash_to_group != job_to_group:
+                print(f"{WARN} Chain index mismatch: hash=({hash_from_group},{hash_to_group}) "
+                      f"job=({job_from_group},{job_to_group}) — skipping, pool would reject")
+                continue
 
         nonce_hex = nonce_int.to_bytes(24, "big").hex()
         return job.job_id, nonce_hex, hash_bytes.hex(), blob_bytes, nonce_int
@@ -267,18 +280,30 @@ def submit_and_verify(client: StratumClient, job_id: str,
         sys.exit(1)
     print(f"  CHECKPOINT 3: Python blake3 hash matches ✓")
 
-    # ── checkpoint 4: connected? ──────────────────────────────────────────────
-    if not client.is_connected():
-        print(f"{FAIL} CHECKPOINT 4: client.is_connected()=False before submit")
-        sys.exit(1)
-    print(f"  CHECKPOINT 4: connected ✓")
+    # ── checkpoint 4: chain index must match job ──────────────────────────────
+    bi = (py_hash[30] << 8 | py_hash[31]) % 16
+    hash_fg, hash_tg = bi // 4, bi % 4
+    job_fg  = getattr(client.get_current_job(), "from_group", None) if client.get_current_job() else None
+    job_tg  = getattr(client.get_current_job(), "to_group",   None) if client.get_current_job() else None
+    if job_fg is not None and job_tg is not None:
+        if hash_fg != job_fg or hash_tg != job_tg:
+            print(f"{FAIL} CHECKPOINT 4: chain index mismatch "
+                  f"hash=({hash_fg},{hash_tg}) job=({job_fg},{job_tg}) — pool would reject")
+            sys.exit(1)
+    print(f"  CHECKPOINT 4: chain index ({hash_fg},{hash_tg}) matches job ✓")
 
-    # ── checkpoint 5: job still fresh? ───────────────────────────────────────
+    # ── checkpoint 5: connected? ──────────────────────────────────────────────
+    if not client.is_connected():
+        print(f"{FAIL} CHECKPOINT 5: client.is_connected()=False before submit")
+        sys.exit(1)
+    print(f"  CHECKPOINT 5: connected ✓")
+
+    # ── checkpoint 6: job still fresh? ───────────────────────────────────────
     current = client.get_current_job()
     if current and current.job_id != job_id:
-        print(f"{WARN} CHECKPOINT 5: stale job_id={job_id} current={current.job_id} — submitting anyway")
+        print(f"{WARN} CHECKPOINT 6: stale job_id={job_id} current={current.job_id} — submitting anyway")
     else:
-        print(f"  CHECKPOINT 5: job_id fresh ✓")
+        print(f"  CHECKPOINT 6: job_id fresh ✓")
 
     # ── submit ────────────────────────────────────────────────────────────────
     t_submit = time.time()
