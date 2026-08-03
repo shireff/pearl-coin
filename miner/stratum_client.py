@@ -52,6 +52,7 @@ class StratumClient:
         # Using block_target from targetBlob as fallback (set_difficulty updates this).
         self._share_target: Optional[int] = None
         self._difficulty_received = threading.Event()
+        self._last_submit_time: float = 0.0  # rate-limit: max 1 submit per 10s
         self._job_id_counter = 0
         self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
         self._lock = threading.Lock()
@@ -114,6 +115,17 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
+            # Rate-limit: max 1 submit per 10 seconds to avoid pool disconnection.
+            # Kryptex silently disconnects when too many submits arrive per second
+            # (happens when share_target is too easy).
+            now = time.time()
+            if now - self._last_submit_time < 10.0:
+                self._logger.debug(
+                    f"Share rate-limited (last submit {now - self._last_submit_time:.1f}s ago): "
+                    f"job={job_id} nonce={nonce[:16]}..."
+                )
+                return True  # pretend sent — don't spam pool
+            self._last_submit_time = now
             # Kryptex Alephium: fire-and-forget, pool does not respond to submit
             params = [job_id, nonce]
             if self._worker_id:
