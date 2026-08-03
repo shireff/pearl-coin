@@ -106,6 +106,9 @@ class StratumClient:
         with self._lock:
             return self._current_job
 
+    def get_worker_id(self) -> str:
+        return self._worker_id
+
     def submit_share(self, job_id: str, nonce: str, result: str = "") -> bool:
         if not self.is_connected():
             return False
@@ -115,7 +118,16 @@ class StratumClient:
             # Using fire-and-forget to avoid blocking _pending_requests for 30s.
             # Any unexpected response will be logged via _handle_response fallback.
             # Official Alephium stratum spec: [jobId, nonceSansExtraNonce, workerId?]
+            # Some pools use the worker/session id returned by mining.subscribe or
+            # mining.authorize to attribute the share to the correct worker.
             params = [job_id, nonce]
+            if self._worker_id:
+                params.append(self._worker_id)
+            if self._worker_id:
+                self._logger.debug(f"Alephium mining.submit worker_id={self._worker_id}")
+            else:
+                self._logger.warning("Alephium mining.submit has no worker_id available")
+            self._logger.debug(f"Alephium mining.submit params: {params}")
             sent = self._send_fire_and_forget("mining.submit", params)
             if sent:
                 self._logger.info(

@@ -111,6 +111,10 @@ class PoolMiningClient:
             return False
 
         if self.algorithm == "alephium":
+            self._logger.debug(
+                f"PoolMiningClient.submit_plain_proof worker_id={self._stratum.get_worker_id() if self._stratum else '<no stratum>'} "
+                f"target_job_id={target_job_id} nonce={nonce[:16]}..."
+            )
             success = self._stratum.submit_share(target_job_id, nonce)
         else:
             success = self._stratum.submit_share(target_job_id, nonce, result_hex)
