@@ -128,16 +128,36 @@ class StratumClient:
             self._last_submit_time = now
 
             # Send full 24-byte nonce — E2E test confirmed Kryptex accepts full24.
-            # nonceSansExtraNonce (22B) was causing Valid=0; full24 (24B) was accepted.
             nonce_submit = nonce
 
             self._logger.info(
                 f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1}"
             )
 
-            # Kryptex Alephium: fire-and-forget — pool does NOT send response to submit.
-            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit])
-            return sent
+            # Use _send_request to capture pool response (result/error).
+            # Kryptex responds to submit with {result: true/false/null, error: ...}
+            response = self._send_request("mining.submit", [job_id, nonce_submit], timeout=5.0)
+            if response is None:
+                # Pool did not respond in 5s — treat as fire-and-forget accepted
+                self._logger.debug(f"Pool submit: no response in 5s (fire-and-forget) job={job_id}")
+                return True
+
+            result_val = response.get("result")
+            error = response.get("error")
+            if error:
+                self._logger.warning(
+                    f"Pool submit REJECTED: job={job_id} error={error} nonce={nonce_submit}"
+                )
+                return False
+
+            accepted = bool(result_val)
+            if accepted:
+                self._logger.info(f"Pool submit ACCEPTED: job={job_id} result={result_val}")
+            else:
+                self._logger.warning(
+                    f"Pool submit NOT ACCEPTED: job={job_id} result={result_val} nonce={nonce_submit}"
+                )
+            return accepted
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
