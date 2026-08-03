@@ -127,38 +127,42 @@ class StratumClient:
 
             self._last_submit_time = now
 
-            # Alephium Stratum spec: params = [jobId, nonceSansExtraNonce, workerId?]
-            # nonceSansExtraNonce = full 24-byte nonce with 2-byte extranonce removed.
-            # The nonce arg here is full24 (48 hex chars). Strip bytes[16:18] = extranonce.
+            # Alephium Stratum spec: params = [jobId, nonceSansExtraNonce]
+            # nonceSansExtraNonce = full 24-byte nonce minus the 2-byte extranonce.
+            #
+            # The extranonce position inside the 24-byte big-endian nonce depends on
+            # the extranonce value itself (extranonce_val << 48 places it at byte 24-8=16
+            # relative to the uint64, but the uint64 is in bytes[16:24] of the 24-byte
+            # representation only when extranonce fits in bytes[16:18]).
+            #
+            # Correct derivation: the kernel sets base_nonce = extranonce_val << 48.
+            # In 8-byte big-endian uint64: byte[0]=en_hi, byte[1]=en_lo, bytes[2:8]=counter
+            # In 24-byte representation:  bytes[16:18]=extranonce, bytes[18:24]=counter
+            # → nonceSansExtraNonce = nonce[0:32] + nonce[36:48] (skip chars 32-35 = 2 bytes)
+            #
+            # Verification: extranonce='3ad8', full nonce (24B) hex:
+            #   ...000000 3a d8 xx xx xx xx xx xx
+            #   chars: 0-29=zeros, 30-31='3a', 32-33='d8' ← skip these, 34-47=counter
+            # Wait — extranonce_val=0x3ad8, base_nonce=0x3ad8<<48=0x3ad8000000000000
+            # to_bytes(8,'big') = [0x3a, 0xd8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+            # In 24B: bytes[16:24] = [0x3a,0xd8,0x00,...,counter]
+            # So extranonce is at bytes[16:18] = hex chars [32:36] ✓
+            #
+            # Confirmed: skip hex chars [32:36] to get nonceSansExtraNonce (44 hex = 22 bytes)
             if len(nonce) == 48:
-                # bytes[0:16] + bytes[18:24] → 22 bytes = 44 hex chars
-                nonce_sans = nonce[:32] + nonce[36:]
+                nonce_sans = nonce[:32] + nonce[36:]  # 44 hex = 22 bytes
             else:
-                nonce_sans = nonce  # unexpected length — send as-is
-
-            params = [job_id, nonce_sans]
-
-            # Use _send_request so we can see pool's result/error response
-            response = self._send_request("mining.submit", params, timeout=10.0)
-            if response is None:
-                self._logger.warning(
-                    f"Pool submit timeout/no-response: job={job_id} nonce_sans={nonce_sans}"
-                )
-                return False
-
-            result_val = response.get("result", False)
-            error = response.get("error")
-            if error:
-                self._logger.warning(
-                    f"Pool submit rejected: job={job_id} error={error} nonce_sans={nonce_sans}"
-                )
-                return False
+                nonce_sans = nonce
 
             self._logger.info(
-                f"Pool submit accepted: job={job_id} result={result_val} "
-                f"nonce={nonce} nonce_sans={nonce_sans}"
+                f"Pool submit: job={job_id} full={nonce} sans={nonce_sans} "
+                f"extranonce={self._extranonce1}"
             )
-            return bool(result_val)
+
+            # Kryptex Alephium: fire-and-forget — pool does NOT send response to submit.
+            # Using _send_request causes 10s timeout on every share.
+            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_sans])
+            return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
             params = [job_id, nonce, result, worker]
