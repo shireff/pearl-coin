@@ -115,15 +115,17 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # Rate-limit: max 1 submit per 10 seconds to avoid pool disconnection.
-            # Kryptex silently disconnects when too many submits arrive per second
-            # (happens when share_target is too easy).
+            # Rate-limit submits to avoid Kryptex silently disconnecting.
+            # With difficulty=512 and 700 MH/s the miner finds ~1 share/second —
+            # submitting every single one would flood the pool. Cap at 1 per 2s.
             now = time.time()
-            if now - self._last_submit_time < 10.0:
+            elapsed_since_last = now - self._last_submit_time
+            if elapsed_since_last < 2.0:
                 self._logger.debug(
-                    f"Share rate-limited (last submit {now - self._last_submit_time:.1f}s ago): "
+                    f"Share rate-limited ({elapsed_since_last:.2f}s < 2.0s): "
                     f"job={job_id} nonce={nonce[:16]}..."
                 )
+                return True  # pretend sent
                 return True  # pretend sent — don't spam pool
             self._last_submit_time = now
             # Kryptex Alephium: fire-and-forget, pool does not respond to submit
