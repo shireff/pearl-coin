@@ -111,11 +111,12 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            worker_id = getattr(self, "_worker_id", "") or ""
-            params = [job_id, nonce, worker_id] if worker_id else [job_id, nonce]
+            # Alephium stratum: [jobId, nonceSansExtraNonce]
+            # No worker_id in params — pool identifies worker from connection.
+            params = [job_id, nonce]
             sent = self._send_fire_and_forget("mining.submit", params)
             if sent:
-                self._logger.info(f"Pool submit sent (fire-and-forget): job={job_id} nonce={nonce[:16]}...")
+                self._logger.info(f"Pool submit sent (fire-and-forget): job={job_id} nonce={nonce}...")
             return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]

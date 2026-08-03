@@ -613,10 +613,14 @@ class AlephiumMiningSession:
     def get_last_result(self) -> tuple[bool, str, str]:
         if not self._last_found or self._last_nonce < 0:
             return False, "", ""
-        # Return the canonical 24-byte nonce hex string so the share payload
-        # matches the pool's expected submit width.
-        nonce_bytes = self._last_nonce_bytes
-        nonce_hex = nonce_bytes.hex()
+        # Alephium stratum protocol: submit nonceSansExtraNonce only.
+        # The pool already knows the extranonce (from set_extranonce) and
+        # prepends it when verifying. We must send only the 6-byte counter
+        # (lower 48 bits), not the full 24-byte nonce.
+        # Full nonce: zeros(16) + extranonce(2) + counter(6)
+        # Submit:     counter(6) = nonce & 0xFFFFFFFFFFFF
+        nonce_sans_extranonce = self._last_nonce & 0xFFFFFFFFFFFF
+        nonce_hex = nonce_sans_extranonce.to_bytes(6, "big").hex()
         return True, nonce_hex, self._last_hash_hex
 
     def close(self) -> None:
