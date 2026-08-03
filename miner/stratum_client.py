@@ -154,17 +154,12 @@ class StratumClient:
         return result_val is True
 
     def _subscribe_and_authorize(self) -> bool:
-        # Alephium Stratum protocol requires mining.hello before subscribe.
-        # See: https://docs.alephium.org/mining/alephium-stratum
-        hello_response = self._send_request(
+        # Alephium Stratum: mining.hello is optional — send fire-and-forget, don't block.
+        self._send_fire_and_forget(
             "mining.hello",
             ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"],
         )
-        if hello_response is not None:
-            self._logger.info(f"[HELLO] result={str(hello_response.get('result',''))[:120]}")
-        else:
-            # Non-fatal — some pools skip hello
-            self._logger.debug("[HELLO] no response — pool may not require it")
+        self._logger.debug("[HELLO] sent (fire-and-forget)")
 
         subscribe_response = self._send_request(
             "mining.subscribe",
