@@ -153,13 +153,17 @@ class StratumClient:
         return result_val is True
 
     def _subscribe_and_authorize(self) -> bool:
-        subscribe_response = self._send_request("mining.subscribe", [])
+        subscribe_response = self._send_request(
+            "mining.subscribe",
+            ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"],
+        )
         if subscribe_response is None or not subscribe_response.get("result"):
             self._logger.error("Failed to subscribe to pool")
             return False
 
         self._subscribed = True
         result = subscribe_response["result"]
+        self._logger.info(f"[SUBSCRIBE] result={str(result)[:120]}")
         if isinstance(result, list) and len(result) > 1:
             extranonce = result[1]
             if isinstance(extranonce, list) and len(extranonce) > 0:
@@ -186,7 +190,37 @@ class StratumClient:
         elif not self._worker_id:
             self._worker_id = ""
         self._authorized = True
+
+        # Ask pool for a manageable share difficulty after auth.
+        # Kryptex Alephium does not auto-send set_difficulty — we must request it.
+        # suggest_difficulty is fire-and-forget; pool may ignore it but usually honours it.
+        if self.algorithm == "alephium":
+            self._suggest_difficulty()
+
         return True
+
+    def _suggest_difficulty(self) -> None:
+        """Send mining.suggest_difficulty so Kryptex sends us a share target.
+
+        Kryptex Alephium protocol notes:
+        - Pool does NOT auto-send set_difficulty after authorize
+        - mining.suggest_difficulty(1.0) triggers pool to respond with set_difficulty
+        - mining.suggest_target is the hex-target variant (some pool versions)
+        - We send both to maximise compatibility
+        """
+        # suggest_difficulty: float (1.0 = easiest, pool adjusts up)
+        self._send_fire_and_forget("mining.suggest_difficulty", [1.0])
+        self._logger.info("[SUGGEST] mining.suggest_difficulty(1.0) sent")
+
+        # suggest_target: hex string equivalent to difficulty=1
+        # target = 2^256 / 1 = 0xffff...ff (all ones = easiest)
+        easy_target_hex = "f" * 64
+        self._send_fire_and_forget("mining.suggest_target", [easy_target_hex])
+        self._logger.info(f"[SUGGEST] mining.suggest_target({easy_target_hex[:16]}...) sent")
+
+        self._logger.info(
+            "[SUGGEST] Waiting for pool to respond with set_difficulty or set_target ..."
+        )
 
     def _send_fire_and_forget(self, method: str, params: list) -> bool:
         if not self._sock:
