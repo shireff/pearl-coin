@@ -203,6 +203,9 @@ def parse_args():
                    help="Pool password (default: x)")
     g.add_argument("--pool-worker", default="",
                    help="Worker name (default: auto from username)")
+    g.add_argument("--pool-algorithm", default=None,
+                   choices=["pearl", "alephium"],
+                   help="Force pool mining algorithm (default: auto-detect from URL)")
     g = parser.add_argument_group("Gateway connection")
     g.add_argument("--gateway-socket", default=os.environ.get("MINER_RPC_SOCKET_PATH", DEFAULT_GATEWAY_SOCKET))
     g.add_argument("--gateway-tcp", action="store_true", default=os.environ.get("MINER_RPC_TRANSPORT", "uds").lower() == "tcp")
@@ -220,6 +223,9 @@ def parse_args():
                    help="Number of B-col partitions (more = more nonces per round)")
     g.add_argument("--num-jobs", type=int, default=int(os.environ.get("miner_num_jobs", "1")),
                    help="Number of parallel mining jobs per round")
+    g.add_argument("--alph-nonces-per-round", type=int,
+                   default=int(os.environ.get("miner_alph_nonces_per_round", str(1 << 24))),
+                   help="Alephium nonces per GPU round (default: 16M = 1<<24, higher = more MH/s)")
     return parser.parse_args()
 
 
@@ -596,7 +602,21 @@ class AlephiumMiningSession:
         return self._last_found, self._last_nonce
 
     def get_last_result(self) -> tuple[bool, str, str]:
-        if not self._last_found or self._last_nonce < 0:
+        if not self._last_found:
+            return False, "", ""
+        # _last_nonce is always unsigned (masked with 0xFFFFFFFFFFFFFFFF in run_round).
+        # The sentinel value 0xFFFFFFFFFFFFFFFF means "not found" from the kernel.
+        if self._last_nonce == 0xFFFFFFFFFFFFFFFF:
+            self._logger.error(
+                "[get_last_result] _last_found=True but _last_nonce is sentinel 0xFFFFFFFFFFFFFFFF — "
+                "kernel returned no valid nonce"
+            )
+            return False, "", ""
+        if self._last_nonce < 0:
+            self._logger.error(
+                f"[get_last_result] _last_nonce={self._last_nonce} is negative — "
+                "sign conversion error in run_round"
+            )
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
@@ -654,8 +674,12 @@ def main():
         if pool_mode:
             logger.info(f"Starting in POOL mode: {args.pool_url}")
             # Detect algorithm BEFORE connect so StratumClient is built with correct algorithm
-            pool_algorithm = detect_pool_algorithm(args.pool_url)
-            logger.info(f"Detected pool algorithm: {pool_algorithm}")
+            if args.pool_algorithm is not None:
+                pool_algorithm = args.pool_algorithm
+                logger.info(f"Pool algorithm forced by --pool-algorithm: {pool_algorithm}")
+            else:
+                pool_algorithm = detect_pool_algorithm(args.pool_url)
+                logger.info(f"Detected pool algorithm: {pool_algorithm}")
             client = PoolMiningClient(
                 pool_url=args.pool_url,
                 username=args.pool_username,
@@ -729,8 +753,8 @@ def main():
         num_jobs = args.num_jobs
         logger.info(f"Initialising mining session num_jobs={num_jobs} P={P} Q={Q} num_combos={P*Q}...")
         if pool_mode and pool_algorithm == "alephium":
-            session = AlephiumMiningSession()
-            logger.info(f"Alephium session ready — nonces_per_round={session.nonces_per_round}")
+            session = AlephiumMiningSession(nonces_per_round=args.alph_nonces_per_round)
+            logger.info(f"Alephium session ready — nonces_per_round={session.nonces_per_round}  ({session.nonces_per_round/1e6:.1f}M)")
         else:
             session = MiningGraphSession(settings, num_jobs=num_jobs, P=P, Q=Q)
             smem_kb = estimate_shared_mem_bytes(session.tile_h, session.tile_w, session.rank) // 1024
@@ -805,7 +829,12 @@ def main():
                 elapsed = session._t_start.elapsed_time(session._t_end) / 1000.0
                 if isinstance(session, AlephiumMiningSession):
                     tmok_per_s = session.nonces_per_round / elapsed / 1e6 if elapsed > 0 else 0.0
-                    logger.debug(f"GPU round time: {elapsed*1000:.1f}ms  nonces={session.nonces_per_round}  tmok/s={tmok_per_s:.0f}")
+                    logger.info(
+                        f"[ROUND] alephium  time={elapsed*1000:.1f}ms  "
+                        f"nonces={session.nonces_per_round}  "
+                        f"MH/s={tmok_per_s:.2f}  "
+                        f"base_nonce={session._base_nonce:#018x}"
+                    )
                 else:
                     tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0
                     tmok_per_s = tmok / elapsed if elapsed > 0 else 0.0
@@ -818,16 +847,41 @@ def main():
                 if won:
                     if pool_mode:
                         ok, nonce_hex, result_hex = session.get_last_result()
-                        logger.info(f"SHARE FOUND: ok={ok} nonce_hex={nonce_hex[:16] if nonce_hex else 'None'}...")
-                        if ok and nonce_hex:
+                        logger.info(
+                            f"[WINNER] GPU found candidate  ok={ok}  "
+                            f"nonce_hex={nonce_hex[:32] if nonce_hex else '<empty>'}  "
+                            f"nonce_len={len(nonce_hex)//2 if nonce_hex else 0}B  "
+                            f"hash={result_hex[:32] if result_hex else '<empty>'}  "
+                            f"job_id={getattr(mining_job, 'job_id', '?')}  "
+                            f"target={getattr(mining_job, 'target', '?'):#x}"
+                        )
+                        if not ok:
+                            logger.error(
+                                "[WINNER→SKIP] get_last_result returned ok=False — "
+                                f"_last_found={session._last_found}  "
+                                f"_last_nonce={session._last_nonce}  "
+                                f"_last_hash={session._last_hash_hex[:32] if session._last_hash_hex else '<empty>'}  "
+                                f"chain_ok={session._last_chain_ok}"
+                            )
+                        elif not nonce_hex:
+                            logger.error(
+                                "[WINNER→SKIP] nonce_hex is empty after get_last_result  "
+                                f"_last_nonce={session._last_nonce}  mode={__import__('os').environ.get('PEARL_NONCE_SUBMIT_MODE','full24')}"
+                            )
+                        else:
                             job_id = getattr(mining_job, "job_id", "")
                             success = _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
                             if success:
-                                logger.info(f"Pool share submitted: job_id={job_id} nonce={nonce_hex[:16]}...")
+                                logger.info(
+                                    f"[SUBMIT OK] job_id={job_id}  nonce={nonce_hex[:32]}  "
+                                    f"hash={result_hex[:32] if result_hex else '<empty>'}"
+                                )
                             else:
-                                logger.warning(f"Pool share submit failed. job_id={job_id} nonce={nonce_hex[:16]}...")
-                        else:
-                            logger.warning("Won but could not extract nonce/result for pool")
+                                logger.warning(
+                                    f"[SUBMIT FAIL] Pool rejected or error  job_id={job_id}  "
+                                    f"nonce={nonce_hex[:32]}  nonce_len={len(nonce_hex)//2}B  "
+                                    f"connected={_client_ref[0].is_connected()}"
+                                )
                     else:
                         plain_proof = session.build_proof(mining_job)
                         _client_ref[0].submit_plain_proof(plain_proof, mining_job)

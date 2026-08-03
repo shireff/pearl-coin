@@ -264,7 +264,7 @@ class StratumClient:
             self.on_error("Connection lost")
 
     def _handle_message(self, raw: str) -> None:
-        self._logger.debug(f"[STRATUM RECV] {raw}")
+        self._logger.info(f"[STRATUM RECV] {raw[:500]}")
         try:
             message = json.loads(raw)
         except json.JSONDecodeError:
@@ -409,4 +409,15 @@ class StratumClient:
             data_list[0] = message
             event.set()
         else:
-            self._logger.info(f"[Pool response] id={request_id} {message}")
+            # Unsolicited response (fire-and-forget submit reply, late response, etc.)
+            result = message.get("result")
+            error = message.get("error")
+            method = message.get("method", "")
+            if error:
+                self._logger.warning(
+                    f"[Pool unsolicited] id={request_id} method={method!r} error={error}"
+                )
+            else:
+                self._logger.info(
+                    f"[Pool unsolicited] id={request_id} method={method!r} result={str(result)[:120]}"
+                )

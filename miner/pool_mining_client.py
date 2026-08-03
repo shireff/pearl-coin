@@ -102,26 +102,50 @@ class PoolMiningClient:
 
     def submit_plain_proof(self, nonce: str, result_hex: str, job_id: str = "") -> bool:
         if not self.is_connected() or not self._stratum:
-            self._logger.error("Cannot submit: not connected to pool")
+            self._logger.error(
+                "[SUBMIT FAIL] Cannot submit: not connected to pool  "
+                f"connected={self._connected}  stratum={self._stratum is not None}"
+            )
             return False
 
         target_job_id = job_id or (self._current_job.job_id if self._current_job else "")
         if not target_job_id:
-            self._logger.error("Cannot submit: no job ID")
+            self._logger.error(
+                f"[SUBMIT FAIL] Cannot submit: no job ID  "
+                f"job_id_arg={job_id!r}  current_job={self._current_job is not None}"
+            )
             return False
 
-        if self.algorithm == "alephium":
-            self._logger.debug(
-                f"PoolMiningClient.submit_plain_proof worker_id={self._stratum.get_worker_id() if self._stratum else '<no stratum>'} "
-                f"target_job_id={target_job_id} nonce={nonce[:16]}..."
+        worker_id = self._stratum.get_worker_id() if self._stratum else "<no stratum>"
+        nonce_preview = nonce[:32] if nonce else "<empty>"
+
+        if not nonce:
+            self._logger.error(
+                f"[SUBMIT FAIL] nonce is empty  job_id={target_job_id}  worker_id={worker_id}"
             )
+            return False
+
+        self._logger.info(
+            f"[SUBMIT] algorithm={self.algorithm}  job_id={target_job_id}  "
+            f"nonce={nonce_preview}  nonce_len={len(nonce)//2}B  "
+            f"result_hex={result_hex[:16] if result_hex else '<empty>'}  worker_id={worker_id}"
+        )
+
+        if self.algorithm == "alephium":
             success = self._stratum.submit_share(target_job_id, nonce)
         else:
             success = self._stratum.submit_share(target_job_id, nonce, result_hex)
+
         if success:
-            self._logger.info(f"Share accepted: nonce={nonce[:16]}...")
+            self._logger.info(
+                f"[SUBMIT OK] Share accepted by pool  job_id={target_job_id}  nonce={nonce_preview}"
+            )
         else:
-            self._logger.warning(f"Share rejected: nonce={nonce[:16]}...")
+            self._logger.warning(
+                f"[SUBMIT REJECTED] Pool rejected share  job_id={target_job_id}  "
+                f"nonce={nonce_preview}  nonce_len={len(nonce)//2}B  "
+                f"result={result_hex[:32] if result_hex else '<empty>'}"
+            )
 
         return success
 
@@ -129,7 +153,11 @@ class PoolMiningClient:
         return self._worker_id
 
     def _on_pool_job(self, job: StratumJob) -> None:
-        self._logger.debug(f"Received new job from pool: {job.job_id}")
+        self._logger.info(
+            f"[JOB] New job from pool: id={job.job_id}  target={job.target:#x}  "
+            f"block_target={job.block_target:#x}  height={job.height}  "
+            f"blob_len={len(job.blob)}  difficulty={job.difficulty}"
+        )
         self._convert_job(job)
 
     def _on_pool_error(self, error: str) -> None:
