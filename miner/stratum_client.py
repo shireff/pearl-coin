@@ -151,59 +151,41 @@ class StratumClient:
             self._logger.info(f"Pool submit response: result={result_val}")
         return result_val is True
 
-    def _subscribe_and_authorize(self) -> bool:
-        # Alephium stratum spec requires mining.hello as first handshake step.
-        # Some pools ignore it, but Kryptex may require it to register the session.
-        if self.algorithm == "alephium":
-            hello_response = self._send_request(
-                "mining.hello", ["pearl-miner/1.0.0", "AlephiumStratum/1.0.0"],
-                timeout=5.0
-            )
-            if hello_response is None:
-                self._logger.warning("mining.hello: no response (pool may not require it)")
-            else:
-                self._logger.info(f"mining.hello response: {hello_response}")
+def _subscribe_and_authorize(self) -> bool:
+    subscribe_response = self._send_request("mining.subscribe", [])
+    if subscribe_response is None or not subscribe_response.get("result"):
+        self._logger.error("Failed to subscribe to pool")
+        return False
 
-        subscribe_response = self._send_request("mining.subscribe", [])
-        if subscribe_response is None or not subscribe_response.get("result"):
-            self._logger.error("Failed to subscribe to pool")
-            return False
+    self._subscribed = True
+    result = subscribe_response["result"]
+    if isinstance(result, list) and len(result) > 1:
+        extranonce = result[1]
+        if isinstance(extranonce, list) and len(extranonce) > 0:
+            self._extranonce1 = str(extranonce[0])
+        else:
+            self._extranonce1 = str(extranonce)
+    elif isinstance(result, str) and result:
+        # Kryptex Alephium: subscribe result is the session/worker id (e.g. "00000000")
+        self._worker_id = str(result).strip()
+        self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
 
-        self._subscribed = True
-        result = subscribe_response["result"]
-        if isinstance(result, list) and len(result) > 1:
-            extranonce = result[1]
-            if isinstance(extranonce, list) and len(extranonce) > 0:
-                self._extranonce1 = str(extranonce[0])
-            else:
-                self._extranonce1 = str(extranonce)
-        elif isinstance(result, str) and result:
-            # Kryptex Alephium: subscribe result is the session/worker id (e.g. "00000000")
-            # Store it so submit_share sends [job_id, nonce, worker_id] not [job_id, nonce]
-            self._worker_id = str(result).strip()
-            self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
+    authorize_response = self._send_request(
+        "mining.authorize", [self.username, self.password]
+    )
+    if authorize_response is None or not authorize_response.get("result"):
+        self._logger.error(f"Failed to authorize with pool: {self.username}")
+        return False
 
-        authorize_response = self._send_request(
-            "mining.authorize", [self.username, self.password]
-        )
-        if authorize_response is None or not authorize_response.get("result"):
-            self._logger.error(f"Failed to authorize with pool: {self.username}")
-            return False
-
-        auth_result = authorize_response.get("result")
-        if isinstance(auth_result, str) and auth_result:
-            # Pool returned a string worker_id from authorize — use it
-            self._worker_id = str(auth_result).strip()
-        elif isinstance(auth_result, bool):
-            # Some Kryptex Alephium pools respond with a bare true here.
-            # Preserve any worker/session id already discovered from subscribe.
-            self._worker_id = self._worker_id or ""
-        elif not self._worker_id:
-            # No worker_id from subscribe or authorize — leave empty
-            self._worker_id = ""
-        # else: keep existing _worker_id set from subscribe result
-        self._authorized = True
-        return True
+    auth_result = authorize_response.get("result")
+    if isinstance(auth_result, str) and auth_result:
+        self._worker_id = str(auth_result).strip()
+    elif isinstance(auth_result, bool):
+        self._worker_id = self._worker_id or ""
+    elif not self._worker_id:
+        self._worker_id = ""
+    self._authorized = True
+    return True
 
     def _send_fire_and_forget(self, method: str, params: list) -> bool:
         if not self._sock:
