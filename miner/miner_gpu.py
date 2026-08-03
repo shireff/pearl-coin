@@ -600,7 +600,7 @@ class AlephiumMiningSession:
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
-        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "sans22")
+        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")
         # Verified nonce layout: zeros(16) + extranonce(2) + counter(6)
         # bytes[16:18] = extranonce, bytes[18:24] = counter
         if mode == "sans22":
