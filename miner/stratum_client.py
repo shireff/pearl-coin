@@ -48,10 +48,9 @@ class StratumClient:
         self._current_job: Optional[StratumJob] = None
         self._worker_id = ""
         self._extranonce1 = ""
-        # Pool share target — default difficulty=512 for Alephium (Kryptex default)
-        self._share_target: Optional[int] = (
-            int((2**256 - 1) // 512) if algorithm == "alephium" else None
-        )
+        # Pool share target — None until set_difficulty/set_target arrives from pool.
+        # Using block_target from targetBlob as fallback (set_difficulty updates this).
+        self._share_target: Optional[int] = None
         self._difficulty_received = threading.Event()
         self._job_id_counter = 0
         self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
