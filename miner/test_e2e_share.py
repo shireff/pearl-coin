@@ -154,29 +154,48 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
     Returns:
         (job_id, nonce_sans_hex, hash_hex, blob_bytes, nonce24)
 
-        nonce_sans_hex: 22-byte nonceSansExtraNonce as hex (44 chars) — sent to pool
-        nonce24:        full 24-byte nonce bytes — for verification
+    Nonce layout (reference: inlined-blake.hpp + stratum spec):
+        kernel writes uint64 little-endian into buf[0:8], buf[8:24] = zeros
+        nonce24[0:2] MUST equal extraNonce bytes (pool prepends it to nonceSans)
 
-    Reference nonce layout (inlined-blake.hpp + our alph_mine_batch kernel):
-        alph_mine_batch writes uint64 little-endian into buf[0:8], buf[8:24]=zeros
-        nonce24 = winning_uint64.to_bytes(8,'little') + b'\\x00'*16
-        nonceSans = nonce24[2:]   (stratum spec: extraNonce(2) + nonceSans(22) = nonce24)
+        base_nonce = extranonce_le16 | (counter << 16)
+        where extranonce_le16 = eb[0] | (eb[1]<<8)  (little-endian interpretation)
+        and nonces_per_round <= 0x10000 so low 16 bits never overflow into byte[2]
+
+        nonceSansExtraNonce = nonce24[2:]  (22 bytes)
+        pool reconstructs:   extraNonce(2) + nonceSans(22) = nonce24  ✓
     """
     blob_gpu   = torch.zeros(320, dtype=torch.uint8, device="cuda")
     target_gpu = torch.empty(32,  dtype=torch.uint8, device="cuda")
 
+    # Build extranonce_le16 from pool extranonce
+    extranonce_hex = client._extranonce1 or ""
+    extranonce_bytes = b"\x00\x00"
+    extranonce_le16 = 0
+    if extranonce_hex and len(extranonce_hex) >= 4:
+        try:
+            eb = bytes.fromhex(extranonce_hex)[:2]
+            extranonce_bytes = eb
+            extranonce_le16 = eb[0] | (eb[1] << 8)
+            print(f"{INFO} extranonce={eb.hex()}  le16={extranonce_le16:#06x}")
+        except Exception:
+            pass
+
+    # nonces_per_round must be <= 0x10000 to keep nonce24[0:2] = extranonce
+    if nonces_per_round > 0x10000:
+        nonces_per_round = 0x10000
+        print(f"{WARN} nonces_per_round clamped to 0x10000 (64K) to preserve extranonce in nonce24[0:2]")
+
+    counter = 0  # upper 48-bit counter
     deadline = time.time() + timeout
     rounds   = 0
     job      = initial_job
-    base_nonce: int = 0  # start from zero — no extranonce embedding in our nonce
 
     print(f"{INFO} Starting GPU mining loop  nonces_per_round={nonces_per_round:,}")
-    print(f"{INFO} extranonce={client._extranonce1!r}  (pool will prepend to nonceSans)")
 
     while time.time() < deadline:
         rounds += 1
 
-        # Refresh job from pool (non-blocking)
         latest = client.get_current_job()
         if latest and latest.job_id != job.job_id:
             job = latest
@@ -189,47 +208,48 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
             time.sleep(0.05)
             continue
 
-        # Load blob into GPU (302 bytes, last 18 stay zero)
         blob_gpu[:302].copy_(torch.frombuffer(blob_bytes, dtype=torch.uint8))
         blob_gpu[302:].zero_()
 
-        # Target
         target_bytes = job.target.to_bytes(32, "big")
         target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
 
-        bn_signed = (base_nonce if base_nonce < (1 << 63)
-                     else base_nonce - (1 << 64))
+        # base_nonce: low 16 bits = extranonce_le16, upper 48 bits = counter
+        base_nonce = extranonce_le16 | (counter << 16)
+        counter += 1  # each round advances upper bits by 1 (= 0x10000 in nonce space)
+
+        bn_signed = base_nonce if base_nonce < (1 << 63) else base_nonce - (1 << 64)
 
         t0 = time.perf_counter()
-        found, raw_nonce = alph_mine_batch(blob_gpu, bn_signed,
-                                           nonces_per_round, target_gpu)
+        found, raw_nonce = alph_mine_batch(blob_gpu, bn_signed, nonces_per_round, target_gpu)
         elapsed = time.perf_counter() - t0
         mhs = nonces_per_round / elapsed / 1e6
 
-        base_nonce = (base_nonce + nonces_per_round) & 0xFFFFFFFFFFFFFFFF
-
-        if rounds % 20 == 0:
+        if rounds % 500 == 0:
             remaining = int(deadline - time.time())
-            print(f"{INFO} round={rounds}  MH/s={mhs:.1f}  timeout_in={remaining}s")
+            print(f"{INFO} round={rounds}  MH/s={mhs:.1f}  "
+                  f"base_nonce={base_nonce:#018x}  timeout_in={remaining}s")
 
         if not found:
             continue
 
-        # ── Reconstruct nonce24 exactly as kernel produced it ─────────────────
-        # alph_mine_batch writes uint64 little-endian into buf[0:8], buf[8:24]=zeros
-        # Reference: inlined-blake.hpp buffer layout + our CUDA kernel
         nonce_uint64 = int(raw_nonce) & 0xFFFFFFFFFFFFFFFF
         if nonce_uint64 == 0xFFFFFFFFFFFFFFFF:
             print(f"{WARN} Sentinel nonce — skipping")
             continue
 
+        # nonce24: uint64 little-endian (8 bytes) + zeros (16 bytes)
         nonce24 = nonce_uint64.to_bytes(8, "little") + b"\x00" * 16
 
-        # ── Verify with Python blake3 (ground truth) ──────────────────────────
+        # Verify nonce24[0:2] == extranonce
+        if nonce24[:2] != extranonce_bytes:
+            print(f"{WARN} nonce24[0:2]={nonce24[:2].hex()} != extranonce={extranonce_bytes.hex()} "
+                  f"— pool would reconstruct wrong nonce, skipping")
+            continue
+
         hash_bytes = py_double_blake3(nonce24, blob_bytes)
         hash_int   = int.from_bytes(hash_bytes, "big")
 
-        # ── Chain index (pool source: blockChainIndex uses hash[30:32]) ───────
         bi = (hash_bytes[30] << 8 | hash_bytes[31]) % 16
         hash_from_group = bi // 4
         hash_to_group   = bi % 4
@@ -238,18 +258,19 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
 
         print(f"\n{INFO} Candidate found!")
         print(f"  round={rounds}  MH/s={mhs:.1f}")
-        print(f"  nonce_uint64={nonce_uint64:#018x}")
-        print(f"  nonce24={nonce24.hex()}  (kernel little-endian uint64 + zeros)")
-        print(f"  nonceSans={nonce24[2:].hex()}  (22B, sent to pool)")
-        print(f"  extraNonce={client._extranonce1!r}")
-        print(f"  pool_reconstructs={client._extranonce1 or '??'}{nonce24[2:].hex()}")
-        print(f"  hash={hash_bytes.hex()}")
-        print(f"  target={job.target:#x}")
-        print(f"  hash <= target: {hash_int <= job.target}")
+        print(f"  nonce_uint64        = {nonce_uint64:#018x}")
+        print(f"  nonce24             = {nonce24.hex()}  (24B)")
+        print(f"  nonce24[0:2]        = {nonce24[:2].hex()}  (must == extranonce)")
+        print(f"  extranonce          = {extranonce_bytes.hex()}")
+        print(f"  nonceSans           = {nonce24[2:].hex()}  (22B, sent to pool)")
+        print(f"  pool_reconstructs   = {extranonce_bytes.hex()}{nonce24[2:].hex()}")
+        print(f"  hash                = {hash_bytes.hex()}")
+        print(f"  target              = {job.target:#x}")
+        print(f"  hash <= target      = {hash_int <= job.target}")
         print(f"  chain: hash=({hash_from_group},{hash_to_group})  job=({job_from_group},{job_to_group})")
 
         if hash_int > job.target:
-            print(f"{WARN} Python hash > target — skipping (kernel bug?)")
+            print(f"{WARN} Python hash > target — skipping")
             continue
 
         if job_from_group is not None and job_to_group is not None:
@@ -257,7 +278,6 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
                 print(f"{WARN} Chain mismatch — skipping, pool would reject")
                 continue
 
-        # ── nonceSansExtraNonce = nonce24[2:] ─────────────────────────────────
         nonce_sans_hex = nonce24[2:].hex()   # 22 bytes = 44 hex chars
         return job.job_id, nonce_sans_hex, hash_bytes.hex(), blob_bytes, nonce24
 
