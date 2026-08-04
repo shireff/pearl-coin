@@ -180,41 +180,26 @@ class StratumClient:
             # to the full username so the submit payload remains compatible.
             worker_name = self._worker_id if self._worker_id else self.username
 
-            # Submit the pool-visible nonce payload using the normal Stratum request/response
-            # flow so pool accept/reject feedback is captured explicitly.
+            # Kryptex Alephium does not reliably return a JSON-RPC response for
+            # mining.submit, so we send it fire-and-forget and rely on pool-side
+            # logging/monitoring rather than waiting for a response that may never come.
             nonce_submit = nonce
-
             self._logger.info(
                 f"Pool submit: job={job_id} nonce={nonce_submit} worker={worker_name}"
             )
-            response = self._send_request(
+            sent = self._send_fire_and_forget(
                 "mining.submit",
                 [job_id, nonce_submit, worker_name],
-                timeout=15.0,
             )
-            if response is None:
-                self._logger.error(
-                    f"Share submit timed out: job={job_id} nonce={nonce[:16]}... "
-                    f"socket_connected={self._sock is not None}"
-                )
-                self._record_submit_result(False, None, timed_out=True)
-                return False
-
-            result_val = response.get("result", False)
-            error = response.get("error")
-            if error:
-                reason = self._format_submit_reason(error)
-                self._logger.warning(f"[SUBMIT REJECT] job={job_id} nonce={nonce_submit} reason={reason}")
-                self._record_submit_result(False, error)
-                return False
-            if result_val is True:
-                self._logger.info(f"[SUBMIT ACCEPT] job={job_id} nonce={nonce_submit}")
+            if sent:
+                self._logger.info(f"[SUBMIT SENT] job={job_id} nonce={nonce_submit}")
                 self._record_submit_result(True, None)
                 return True
 
-            reason = self._format_submit_reason(result_val)
-            self._logger.warning(f"[SUBMIT REJECT] job={job_id} nonce={nonce_submit} reason={reason}")
-            self._record_submit_result(False, None)
+            self._logger.error(
+                f"Failed to send submit: job={job_id} nonce={nonce[:16]}..."
+            )
+            self._record_submit_result(False, "send_failed")
             return False
 
         worker = self.worker_name if self.worker_name else self.username.split(".")[0]
