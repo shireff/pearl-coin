@@ -718,8 +718,6 @@ class AlephiumMiningSession:
             return False, "", ""
 
         if not self._last_chain_ok:
-            nonce24 = self._last_nonce24
-            bi = (nonce24[30] << 8 | nonce24[31]) % 16  # not the hash — use hash bytes
             hash_b = bytes.fromhex(self._last_hash_hex) if self._last_hash_hex else b"\x00" * 32
             bi = (hash_b[30] << 8 | hash_b[31]) % 16
             self._logger.debug(
