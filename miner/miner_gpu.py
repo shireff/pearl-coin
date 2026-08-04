@@ -568,7 +568,9 @@ class AlephiumMiningSession:
         target_bytes = job.target.to_bytes(32, "big")
         self._target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
         if self._extranonce_set:
-            self._extranonce_gpu.copy_(torch.tensor(self._extranonce_bytes, dtype=torch.uint8, device="cuda"))
+            self._extranonce_gpu.copy_(
+                torch.tensor(list(self._extranonce_bytes), dtype=torch.uint8, device="cuda")
+            )
         else:
             self._extranonce_gpu.zero_()
 
