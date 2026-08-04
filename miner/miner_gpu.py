@@ -674,31 +674,39 @@ class AlephiumMiningSession:
             return False, "", ""
         import os as _os
         nonce_full_24 = self._last_nonce.to_bytes(24, "big")
-        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "full24")
-        # Layout: zeros(16) + extranonce(2) + counter(6) = 24 bytes
-        # Pool verifies: blake3(blake3(nonce24 + headerBlob)) per blockTemplate.hash()
-        if mode == "sans22":
-            # nonceSansExtraNonce: the pool knows the extranonce it assigned.
-            # We submit the full 24-byte nonce with extranonce bytes zeroed out.
-            # Pool reconstructs: extranonce(2) overwritten into the correct position.
-            #
-            # The safest approach: submit the full 24-byte nonce as-is ("full24").
-            # Kryptex verifies the full nonce directly — it does NOT strip extranonce.
-            # Ref: actual pool behavior observed in test_e2e_share.py (full24 was accepted).
+        mode = _os.environ.get("PEARL_NONCE_SUBMIT_MODE", "ref22")
+
+        # Nonce layout from kernel: nonce_int = extranonce<<48 | counter_6
+        # nonce_full_24 = zeros(16) + extranonce(2) + counter(6)
+        #
+        # Pool reconstructs full nonce as: extranonce(2) + nonce_sans(22)
+        # and verifies: blake3(blake3(extranonce + nonce_sans + headerBlob))
+        #
+        # For pool to get: extranonce(2) + zeros(14) + counter(8)
+        # we must submit nonce_sans = zeros(14) + counter(8)
+        # where counter_8 = counter_6 zero-padded to 8 bytes
+        #
+        # counter_6 is in bytes[18:24] of nonce_full_24
+        # nonce_sans = zeros(14) + b'\x00\x00' + counter_6 = zeros(16) + counter_6 → wrong
+        # nonce_sans = zeros(14) + counter_6.to_bytes(8,'big') ← correct (zero-pad counter to 8B)
+
+        counter_6_bytes = nonce_full_24[18:24]  # 6 bytes
+        # Pad to 8 bytes (big-endian): prepend 2 zero bytes
+        counter_8_bytes = b'\x00\x00' + counter_6_bytes  # 8 bytes
+
+        if mode == "ref22":
+            # nonceSansExtraNonce per reference miner layout:
+            # zeros(14) + counter(8) = 22 bytes
+            # Pool prepends extranonce(2) → extranonce + zeros(14) + counter(8) = 24 bytes
+            nonce_hex = (b'\x00' * 14 + counter_8_bytes).hex()
+        elif mode == "full24":
             nonce_hex = nonce_full_24.hex()
-        elif mode == "counter6":
-            # nonceSansExtraNonce: 6-byte counter only (bytes[18:24])
-            nonce_hex = nonce_full_24[18:24].hex()
-        elif mode == "uint64_8":
-            # extranonce + counter as uint64 big-endian (8 bytes)
-            nonce_hex = self._last_nonce.to_bytes(8, "big").hex()
-        elif mode == "zeroed24":
-            # full 24 bytes with extranonce bytes zeroed
-            b = bytearray(nonce_full_24)
-            b[16:18] = b"\x00\x00"
-            nonce_hex = bytes(b).hex()
+        elif mode == "sans22":
+            # Legacy: zeros(16) + counter(6) — known wrong for Kryptex
+            nonce_hex = (nonce_full_24[:16] + nonce_full_24[18:24]).hex()
+        elif mode == "counter8":
+            nonce_hex = counter_8_bytes.hex()
         else:
-            # full24: canonical 24-byte nonce
             nonce_hex = nonce_full_24.hex()
         self._logger.debug(f"[nonce mode={mode}] nonce_hex={nonce_hex} ({len(nonce_hex)//2}B)")
         return True, nonce_hex, self._last_hash_hex
