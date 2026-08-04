@@ -275,7 +275,8 @@ class StratumClient:
             # PRL pool does not respond to subscribe with params — must be empty list
             subscribe_params = []
 
-        subscribe_timeout = 1.0 if self.algorithm == "pearl" else 10.0
+        # Some PRL/pearl pools are slow to answer subscribe — give them more time.
+        subscribe_timeout = 5.0 if self.algorithm == "pearl" else 10.0
         subscribe_response = self._send_request(
             "mining.subscribe",
             subscribe_params,
@@ -304,9 +305,17 @@ class StratumClient:
                 self._worker_id = str(result).strip()
                 self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
 
-        authorize_response = self._send_request(
-            "mining.authorize", [self.username, self.password]
-        )
+        # Authorize: retry a few times if we get no response (network/pool may be slow)
+        authorize_response = None
+        for attempt in range(3):
+            authorize_response = self._send_request(
+                "mining.authorize", [self.username, self.password], timeout=15.0
+            )
+            if authorize_response is not None:
+                break
+            self._logger.warning(f"Authorize attempt {attempt+1} timed out, retrying...")
+            time.sleep(0.5 * (attempt + 1))
+
         if authorize_response is None or not authorize_response.get("result"):
             self._logger.error(f"Failed to authorize with pool: {self.username}")
             return False
