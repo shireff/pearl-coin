@@ -455,14 +455,22 @@ class MiningGraphSession:
             )
             self._last_job_id = _job_id
             self._last_target_int = _target_int
+        # Vectorised lexicographic comparison: no Python loop over hash words.
+        # Shape: (N, 8) int64 — compare all words at once then reduce.
         hashes_i64 = hashes.view(-1, 8).to(dtype=torch.int64)
-        win = torch.zeros(hashes_i64.size(0), dtype=torch.bool, device="cuda")
-        eq = torch.ones(hashes_i64.size(0), dtype=torch.bool, device="cuda")
-        for i in range(8):
-            smaller = hashes_i64[:, i] < self._target_buf[i]
-            equal = hashes_i64[:, i] == self._target_buf[i]
-            win |= smaller & eq
-            eq &= equal
+        target_row = self._target_buf.unsqueeze(0)          # (1, 8)
+        smaller = hashes_i64 < target_row                   # (N, 8)
+        equal   = hashes_i64 == target_row                  # (N, 8)
+        # A hash wins if, at the first word where they differ, hash < target.
+        # Equivalent to: win_i = smaller_i AND all(equal_j for j < i)
+        # We compute the "all equal so far" mask via cumprod on the equal tensor.
+        # cumprod([1,1,0,...]) → [1,1,0,...] so later words are masked out.
+        eq_cumulative = torch.cumprod(equal.to(dtype=torch.uint8), dim=1).bool()
+        # Shift the mask right by one: word-i contributes only when words 0..i-1 all equal.
+        # Prepend a column of ones (nothing precedes word 0).
+        ones_col = torch.ones(hashes_i64.size(0), 1, dtype=torch.bool, device="cuda")
+        eq_prefix = torch.cat([ones_col, eq_cumulative[:, :-1]], dim=1)  # (N, 8)
+        win = (smaller & eq_prefix).any(dim=1)              # (N,) bool
         any_winner = win.any()
         self._last_hashes = hashes_i64.cpu()
         self._last_keys = self.keys.cpu()
