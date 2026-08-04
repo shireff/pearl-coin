@@ -449,7 +449,12 @@ class StratumClient:
         params = message.get("params", [])
 
         if method == "mining.notify":
-            self._handle_mining_notify(params)
+            # PRL pool sends params as a dict directly; Alephium sends a list.
+            # Normalize to list so _handle_mining_notify always gets a list.
+            if isinstance(params, dict):
+                self._handle_mining_notify_prl(params)
+            else:
+                self._handle_mining_notify(params)
         elif method == "mining.set_difficulty":
             self._handle_set_difficulty(params)
         elif method == "mining.set_extranonce":
@@ -459,6 +464,50 @@ class StratumClient:
         else:
             self._logger.debug(f"Unhandled notification: {method}")
 
+    def _handle_mining_notify_prl(self, params: dict) -> None:
+        """Handle PRL pool mining.notify where params is a dict (not a list)."""
+        try:
+            job_id = str(params.get("job_id", ""))
+            header_hex = str(params.get("header", ""))
+            target_hex = str(params.get("target", ""))
+            height = params.get("height", 0)
+
+            if not header_hex:
+                self._logger.warning("PRL notify: empty header — skipping")
+                return
+
+            blob = bytes.fromhex(header_hex)
+            block_target = int(target_hex, 16) if target_hex else 0
+
+            with self._lock:
+                share_target = self._share_target
+            target = share_target if share_target is not None else block_target
+
+            job = StratumJob(
+                job_id=job_id,
+                blob=blob,
+                target=target,
+                height=height,
+                clean_jobs=True,
+                block_target=block_target,
+            )
+            job._from_group = None  # type: ignore[attr-defined]
+            job._to_group = None    # type: ignore[attr-defined]
+
+            with self._lock:
+                self._current_job = job
+
+            self._logger.info(
+                f"New PRL job: id={job_id}  target={target:#x}  "
+                f"blob_len={len(blob)}  height={height}"
+            )
+
+            if self.on_job:
+                _t = threading.Thread(target=self.on_job, args=(job,), daemon=True)
+                _t.start()
+        except Exception as e:
+            self._logger.error(f"Failed to parse PRL mining.notify: {e}")
+
     def _handle_mining_notify(self, params: list) -> None:
         try:
             if len(params) == 0:
@@ -466,11 +515,17 @@ class StratumClient:
                 return
 
             param0 = params[0]
+            job_id = ""
+            header_blob_hex = ""
+            target_blob_hex = ""
+            height = 0
+            from_group = None
+            to_group = None
 
             if isinstance(param0, dict):
-                job_id = str(param0.get("jobId", ""))
-                header_blob_hex = str(param0.get("headerBlob", ""))
-                target_blob_hex = str(param0.get("targetBlob", ""))
+                job_id = str(param0.get("job_id") or param0.get("jobId") or "")
+                header_blob_hex = str(param0.get("header") or param0.get("headerBlob") or "")
+                target_blob_hex = str(param0.get("target") or param0.get("targetBlob") or "")
                 height = param0.get("height", 0)
                 from_group = param0.get("fromGroup")
                 to_group = param0.get("toGroup")
@@ -481,6 +536,13 @@ class StratumClient:
                 height = 0
                 from_group = None
                 to_group = None
+            elif isinstance(param0, list):
+                if len(param0) >= 1:
+                    job_id = str(param0[0]) if isinstance(param0[0], str) else str(param0[0])
+                if len(param0) >= 2:
+                    header_blob_hex = str(param0[1])
+                if len(param0) >= 3:
+                    target_blob_hex = str(param0[2])
             else:
                 self._logger.warning(f"Unexpected mining.notify format: {type(param0)}")
                 return
@@ -492,15 +554,16 @@ class StratumClient:
             blob = bytes.fromhex(header_blob_hex)
 
             if target_blob_hex:
-                block_target = int(target_blob_hex, 16)
+                try:
+                    block_target = int(target_blob_hex, 16)
+                except ValueError:
+                    block_target = 0
             else:
                 block_target = 0
 
             with self._lock:
                 share_target = self._share_target
 
-            # Prefer the easier share target from set_difficulty/set_target when
-            # it arrives. Only fall back to targetBlob if no share target is known.
             target = select_stratum_target(block_target, share_target)
             if target == 2**256 - 1:
                 self._logger.warning(
@@ -515,7 +578,6 @@ class StratumClient:
                 clean_jobs=True,
                 block_target=block_target,
             )
-            # Store from/to group on the job object for chain-index validation
             job._from_group = from_group  # type: ignore[attr-defined]
             job._to_group = to_group      # type: ignore[attr-defined]
 

@@ -17,13 +17,23 @@ cd ~/pearl-cion && PEARL_LOG_LEVEL=DEBUG python miner/miner_gpu.py \
 
 for background run
 
-pkill -f miner_gpu.py; sleep 1
-cd ~/pearl-cion && nohup env PEARL_LOG_LEVEL=DEBUG python miner/miner_gpu.py \
-  --pool-url stratum+tcp://alph.kryptex.network:7010 \
-  --pool-username 3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker \
-  --pool-password x --noise-range 256 --P 8 --Q 8 \
-  > /tmp/miner_live.log 2>&1 & echo "PID: $!"
+pkill -f miner_gpu.py || true
+sleep 1
 
+cd ~/pearl-cion && \
+PEARL_LOG_LEVEL=DEBUG nohup python miner/miner_gpu.py \
+  --pool-url stratum+tcp://prl.kryptex.network:7048 \
+  --pool-username krxYM43GWD.worker \
+  --pool-password x \
+  --pool-algorithm pearl \
+  --noise-range 256 \
+  --P 8 \
+  --Q 8 \
+  > /tmp/miner_live.log 2>&1 &
+
+echo "PID: $!"
+sleep 5
+tail -100 /tmp/miner_live.log
 
 
 أمر المراقبة اللايف:
