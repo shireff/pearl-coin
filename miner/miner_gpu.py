@@ -217,6 +217,8 @@ def parse_args():
                    help="Pool username (wallet.worker format)")
     g.add_argument("--pool-password", default="x",
                    help="Pool password (default: x)")
+    g.add_argument("--pool-difficulty", type=int, default=None,
+                   help="Static share difficulty to inject into pool password as d=<number>")
     g.add_argument("--pool-worker", default="",
                    help="Worker name (default: auto from username)")
     g.add_argument("--pool-algorithm", default=None,
@@ -248,6 +250,22 @@ def parse_args():
     g.add_argument("--debug-difficulty", type=float, default=0.0,
                    help="Set a synthetic share difficulty (difficulty = 2^256 / target) for testing; overrides pool target if >0")
     return parser.parse_args()
+
+
+def inject_pool_difficulty_into_password(password: str, difficulty: int) -> str:
+    """Inject or replace a static difficulty directive into the pool password."""
+    if difficulty <= 0:
+        raise ValueError("pool difficulty must be a positive integer")
+
+    password = password or ""
+    if "d=" in password:
+        import re
+        password = re.sub(r"\bd=\d+\b", f"d={difficulty}", password)
+        if "d=" in password:
+            return password
+    if password == "" or password == "x":
+        return f"d={difficulty}"
+    return f"{password},d={difficulty}"
 
 
 def start_gateway_process(rpc_url, rpc_user, rpc_password, mining_address):
@@ -825,10 +843,14 @@ def main():
             else:
                 pool_algorithm = detect_pool_algorithm(args.pool_url)
                 logger.info(f"Detected pool algorithm: {pool_algorithm}")
+            pool_password = args.pool_password
+            if args.pool_difficulty is not None:
+                pool_password = inject_pool_difficulty_into_password(pool_password, args.pool_difficulty)
+                logger.info(f"Injecting pool difficulty into password: d={args.pool_difficulty}")
             client = PoolMiningClient(
                 pool_url=args.pool_url,
                 username=args.pool_username,
-                password=args.pool_password,
+                password=pool_password,
                 worker_name=args.pool_worker,
                 algorithm=pool_algorithm,
             )
