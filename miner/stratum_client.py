@@ -166,17 +166,10 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # Rate-limit submits so we do not hammer the pool with back-to-back shares.
-            now = time.time()
-            elapsed_since_last = now - self._last_submit_time
-            if elapsed_since_last < 2.0:
-                self._logger.debug(
-                    f"Share rate-limited ({elapsed_since_last:.2f}s < 2.0s): "
-                    f"job={job_id} nonce={nonce[:16]}..."
-                )
-                return False
-
-            self._last_submit_time = now
+            # The pool already controls the share difficulty via set_difficulty/set_target.
+            # Do not impose an extra artificial throttle here; valid shares should be
+            # submitted immediately once their chain matches the current job.
+            self._last_submit_time = time.time()
 
             # Worker must be the full "wallet.workerName" format for pool attribution.
             worker_name = self.username  # always use full username (wallet.worker)
