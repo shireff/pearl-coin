@@ -261,34 +261,47 @@ class StratumClient:
         return str(reason)
 
     def _subscribe_and_authorize(self) -> bool:
-        # Alephium Stratum: mining.hello is optional — send fire-and-forget, don't block.
-        self._send_fire_and_forget(
-            "mining.hello",
-            ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"],
-        )
-        self._logger.debug("[HELLO] sent (fire-and-forget)")
+        # Alephium Stratum: mining.hello is optional — only for alephium, not pearl.
+        if self.algorithm == "alephium":
+            self._send_fire_and_forget(
+                "mining.hello",
+                ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"],
+            )
+            self._logger.debug("[HELLO] sent (fire-and-forget)")
 
+        if self.algorithm == "alephium":
+            subscribe_params = ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"]
+        else:
+            subscribe_params = []
+
+        subscribe_timeout = 1.0 if self.algorithm == "pearl" else 10.0
         subscribe_response = self._send_request(
             "mining.subscribe",
-            ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"],
+            subscribe_params,
+            timeout=subscribe_timeout,
         )
         if subscribe_response is None or not subscribe_response.get("result"):
-            self._logger.error("Failed to subscribe to pool")
-            return False
-
-        self._subscribed = True
-        result = subscribe_response["result"]
-        self._logger.info(f"[SUBSCRIBE] result={str(result)[:120]}")
-        if isinstance(result, list) and len(result) > 1:
-            extranonce = result[1]
-            if isinstance(extranonce, list) and len(extranonce) > 0:
-                self._extranonce1 = str(extranonce[0])
+            if self.algorithm == "pearl":
+                self._logger.warning(
+                    "Subscribe response was empty; continuing because pearl pool may authorize directly"
+                )
             else:
-                self._extranonce1 = str(extranonce)
-        elif isinstance(result, str) and result:
-            # Kryptex Alephium: subscribe result is the session/worker id
-            self._worker_id = str(result).strip()
-            self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
+                self._logger.error("Failed to subscribe to pool")
+                return False
+        else:
+            self._subscribed = True
+            result = subscribe_response["result"]
+            self._logger.info(f"[SUBSCRIBE] result={str(result)[:120]}")
+            if isinstance(result, list) and len(result) > 1:
+                extranonce = result[1]
+                if isinstance(extranonce, list) and len(extranonce) > 0:
+                    self._extranonce1 = str(extranonce[0])
+                else:
+                    self._extranonce1 = str(extranonce)
+            elif isinstance(result, str) and result:
+                # Kryptex Alephium: subscribe result is the session/worker id
+                self._worker_id = str(result).strip()
+                self._logger.info(f"Pool subscribe returned worker_id: {self._worker_id}")
 
         authorize_response = self._send_request(
             "mining.authorize", [self.username, self.password]
@@ -305,6 +318,7 @@ class StratumClient:
         elif not self._worker_id:
             self._worker_id = ""
         self._authorized = True
+        self._subscribed = True
 
         # Ask pool for a manageable share difficulty after auth.
         # Kryptex Alephium does not auto-send set_difficulty — we must request it.
