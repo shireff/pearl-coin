@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cuda_runtime.h>
 
 namespace pearl {
 namespace mining {

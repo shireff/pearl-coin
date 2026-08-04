@@ -8,6 +8,13 @@
 namespace pearl {
 namespace mining {
 
+__device__ __forceinline__ uint32_t alph_swap_bytes_u32(uint32_t value) {
+    return ((value & 0x000000FFu) << 24) |
+           ((value & 0x0000FF00u) << 8) |
+           ((value & 0x00FF0000u) >> 8) |
+           ((value & 0xFF000000u) >> 24);
+}
+
 // ── Alephium Blake3 PoW mining kernel ────────────────────────────────────────
 //
 // Alephium PoW contract for the pool is:
@@ -45,7 +52,7 @@ void alph_mine_kernel(
     for (int i = threadIdx.x; i < PADDED_WORDS; i += blockDim.x)
         s_blob[i] = d_blob_words[i];
     for (int i = threadIdx.x; i < 8; i += blockDim.x)
-        s_target[i] = __byte_perm(d_target[i], 0, 0x0123);
+        s_target[i] = alph_swap_bytes_u32(d_target[i]);
     __syncthreads();
 
     if (*d_found_flag) return;
@@ -139,7 +146,7 @@ void alph_mine_kernel(
     // Compare the final 32-byte hash against the target in big-endian order.
     bool winner = true;
     for (int i = 0; i < 8; ++i) {
-        uint32_t hash_be = __byte_perm(outer_cv[i], 0, 0x0123);
+        uint32_t hash_be = alph_swap_bytes_u32(outer_cv[i]);
         if (hash_be < s_target[i]) break;
         if (hash_be > s_target[i]) {
             winner = false;
@@ -148,10 +155,11 @@ void alph_mine_kernel(
     }
 
     if (winner) {
-        unsigned long long int expected = 0xFFFFFFFFFFFFFFFFULL;
-        unsigned long long int desired  = static_cast<unsigned long long int>(nonce);
-        atomicCAS(reinterpret_cast<unsigned long long int*>(d_found_nonce), expected, desired);
-        *d_found_flag = 1;
+        const unsigned long long expected = 0xFFFFFFFFFFFFFFFFULL;
+        const unsigned long long desired = static_cast<unsigned long long>(nonce);
+        if (atomicCAS(reinterpret_cast<unsigned long long*>(d_found_nonce), expected, desired) == expected) {
+            *d_found_flag = 1;
+        }
     }
 }
 
