@@ -362,12 +362,12 @@ class MiningGraphSession:
         self.keys       = torch.zeros((num_jobs, 8), dtype=torch.uint32, device="cuda")
         self.hashes     = torch.empty((num_jobs, self.num_combos, 8), dtype=torch.uint32, device="cuda")
 
-        self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
+        self._target_buf = torch.zeros(8, dtype=torch.uint64, device="cuda")
         self._last_hashes: Optional[torch.Tensor] = None
         self._last_keys: Optional[torch.Tensor] = None
 
         # ── Pre-allocated target buffer (updated in-place each round) ────
-        self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
+        self._target_buf = torch.zeros(8, dtype=torch.uint64, device="cuda")
 
         # ── CUDA Graph for noise_gen (stable kernel, captured once) ──────
         # noise_gen has fixed input shapes every round — safe to capture.
@@ -441,16 +441,22 @@ class MiningGraphSession:
 
         hashes = gpu_jackpot_hash(jackpots, self.keys)
         _target_int = int(mining_job.target)
-        _shifts = torch.arange(8, dtype=torch.int64, device="cuda") * 32
         self._target_buf.copy_(
             torch.tensor(
                 [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)],
-                dtype=torch.int64, device="cpu"
+                dtype=torch.uint64, device="cpu"
             ).cuda(non_blocking=True)
         )
-        hashes_i64 = hashes.view(-1, 8).to(dtype=torch.int64)
-        any_winner = (hashes_i64 <= self._target_buf.unsqueeze(0)).all(dim=-1).any()
-        self._last_hashes = hashes_i64.cpu()
+        hashes_u64 = hashes.view(-1, 8).to(dtype=torch.uint64)
+        win = torch.zeros(hashes_u64.size(0), dtype=torch.bool, device="cuda")
+        eq = torch.ones(hashes_u64.size(0), dtype=torch.bool, device="cuda")
+        for i in range(7, -1, -1):
+            smaller = hashes_u64[:, i] < self._target_buf[i]
+            equal = hashes_u64[:, i] == self._target_buf[i]
+            win |= smaller & eq
+            eq &= equal
+        any_winner = win.any()
+        self._last_hashes = hashes_u64.cpu()
         self._last_keys = self.keys.cpu()
         self._t_end.record()
         return bool(any_winner)
