@@ -154,8 +154,7 @@ class PoolMiningClient:
             )
         else:
             self._logger.warning(
-                f"[SUBMIT SKIP/FAIL] job_id={target_job_id}  nonce={nonce_preview}  "
-                f"(rate-limited or send error)"
+                f"[SUBMIT SKIP/FAIL] job_id={target_job_id}  nonce={nonce_preview}"
             )
             self._logger.warning(
                 f"[SUBMIT-FAIL-CAUSE] algorithm={self.algorithm} connected={self.is_connected()} "

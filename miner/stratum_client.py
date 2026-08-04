@@ -166,7 +166,7 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # Rate-limit submits — pool finds ~1 share/second at difficulty=512
+            # Rate-limit submits so we do not hammer the pool with back-to-back shares.
             now = time.time()
             elapsed_since_last = now - self._last_submit_time
             if elapsed_since_last < 2.0:
@@ -190,6 +190,11 @@ class StratumClient:
                 f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1}"
             )
             sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit, worker_name], use_null_id=True)
+            if not sent:
+                self._logger.error(
+                    f"Share send failed: job={job_id} nonce={nonce[:16]}... "
+                    f"socket_connected={self._sock is not None}"
+                )
             return sent
         else:
             worker = self.worker_name if self.worker_name else self.username.split(".")[0]
