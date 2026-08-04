@@ -324,8 +324,9 @@ class StratumClient:
         # Ask pool for a manageable share difficulty after auth.
         # Kryptex Alephium does not auto-send set_difficulty — we must request it.
         # suggest_difficulty is fire-and-forget; pool may ignore it but usually honours it.
-        if self.algorithm == "alephium":
-            self._suggest_difficulty()
+        # Request an easier share target from the pool via vardiff.
+        # Works for both alephium and pearl — pool may ignore it but usually honours it.
+        self._suggest_difficulty()
 
         return True
 

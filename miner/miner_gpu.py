@@ -366,6 +366,8 @@ class MiningGraphSession:
         self._last_hashes: Optional[torch.Tensor] = None
         self._last_keys: Optional[torch.Tensor] = None
         self._last_mining_job: Optional[object] = None
+        self._last_job_id: str = ""
+        self._last_target_int: int = -1
 
         # ── Pre-allocated target buffer (updated in-place each round) ────
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
@@ -441,16 +443,18 @@ class MiningGraphSession:
         self._mining_stream.synchronize()
 
         hashes = gpu_jackpot_hash(jackpots, self.keys)
+        # Rebuild target buffer when job_id OR target changes (handles set_difficulty on same job)
+        _job_id = getattr(mining_job, "job_id", "")
         _target_int = int(mining_job.target)
-        # Build target words MSB-first (word[0]=MSB, word[7]=LSB).
-        # The pool target may be < 256 bits so the MSB words must be first
-        # to avoid word[7]=0 causing every hash to fail the comparison.
-        self._target_buf.copy_(
-            torch.tensor(
-                [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(7, -1, -1)],
-                dtype=torch.int64, device="cpu"
-            ).cuda(non_blocking=True)
-        )
+        if _job_id != self._last_job_id or _target_int != self._last_target_int:
+            self._target_buf.copy_(
+                torch.tensor(
+                    [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(7, -1, -1)],
+                    dtype=torch.int64, device="cpu"
+                ).cuda(non_blocking=True)
+            )
+            self._last_job_id = _job_id
+            self._last_target_int = _target_int
         hashes_i64 = hashes.view(-1, 8).to(dtype=torch.int64)
         win = torch.zeros(hashes_i64.size(0), dtype=torch.bool, device="cuda")
         eq = torch.ones(hashes_i64.size(0), dtype=torch.bool, device="cuda")
