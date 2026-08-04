@@ -11,17 +11,21 @@ from miner_utils import get_logger
 def build_full_nonce24_from_counter(extranonce_bytes: bytes, counter: int) -> bytes:
     """Build the 24-byte Alephium nonce from a 2-byte pool extranonce and a counter.
 
-    Kryptex reconstructs the full nonce as:
+    The mining kernel and the pool both expect the nonce layout:
         full_nonce24 = extranonce(2 bytes) + nonceSansExtraNonce(22 bytes)
-    The pool expects the first 2 bytes of the full nonce to be the extranonce.
+
+    To keep the Python-side reconstruction byte-for-byte compatible with the
+    kernel, we encode the counter into the first 8 bytes of the 22-byte payload
+    and leave the remaining 14 bytes zero.
     """
     if len(extranonce_bytes) != 2:
         raise ValueError("extranonce_bytes must be exactly 2 bytes")
     if counter < 0:
         raise ValueError("counter must be non-negative")
 
-    counter_bytes = counter.to_bytes(22, "big")
-    return extranonce_bytes + counter_bytes
+    counter_u64 = int(counter) & ((1 << 64) - 1)
+    payload22 = counter_u64.to_bytes(8, "big") + b"\x00" * 14
+    return extranonce_bytes + payload22
 
 
 def build_full_nonce24_from_payload(extranonce_bytes: bytes, payload22: bytes) -> bytes:
@@ -43,13 +47,15 @@ def build_submit_nonce_payload(nonce24: bytes) -> str:
 def select_stratum_target(block_target: int | None, share_target: int | None) -> int:
     """Choose the target to mine against.
 
-    For Alephium, the pool validates against the block target from targetBlob.
-    We should prefer that over any easier share target derived from difficulty.
+    For Alephium, a pool share target from set_difficulty/set_target is usually
+    easier than the full network block target and should be preferred so we can
+    find shares quickly. We only fall back to targetBlob when no share target has
+    been received yet.
     """
-    if block_target and block_target > 0:
-        return int(block_target)
     if share_target is not None and share_target > 0:
         return int(share_target)
+    if block_target and block_target > 0:
+        return int(block_target)
     return 2**256 - 1
 
 
@@ -426,9 +432,8 @@ class StratumClient:
             with self._lock:
                 share_target = self._share_target
 
-            # Prefer the pool's block target (targetBlob) for Alephium mining.
-            # The share target derived from set_difficulty is only a fallback if the
-            # pool never sends a targetBlob.
+            # Prefer the easier share target from set_difficulty/set_target when
+            # it arrives. Only fall back to targetBlob if no share target is known.
             target = select_stratum_target(block_target, share_target)
             if target == 2**256 - 1:
                 self._logger.warning(

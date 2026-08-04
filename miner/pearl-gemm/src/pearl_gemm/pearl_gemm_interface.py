@@ -1050,6 +1050,7 @@ def alph_mine_batch(
     base_nonce,    # int, starting nonce
     num_nonces,    # int, nonces per call (default 1<<20)
     target,        # torch.Tensor uint8[32], device=cuda
+    extranonce=None,
 ):
     """Alephium Blake3 GPU mining — returns (found, nonce).
 
@@ -1064,4 +1065,8 @@ def alph_mine_batch(
     Returns:
         (found: bool, nonce: int) — nonce is -1 if no winner found
     """
-    return pearl_gemm_cuda.alph_mine_batch(blob, base_nonce, num_nonces, target)
+    if extranonce is None:
+        extranonce = torch.zeros(2, dtype=torch.uint8, device=blob.device)
+    elif isinstance(extranonce, (bytes, bytearray)):
+        extranonce = torch.tensor(list(extranonce), dtype=torch.uint8, device=blob.device)
+    return pearl_gemm_cuda.alph_mine_batch(blob, base_nonce, num_nonces, target, extranonce)

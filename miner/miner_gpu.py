@@ -520,6 +520,7 @@ class AlephiumMiningSession:
         self._logger = _get_logger("alephium_session")
         self._blob_gpu = torch.zeros(self.BLOB_PADDED_LEN, dtype=torch.uint8, device="cuda")
         self._target_gpu = torch.empty(32, dtype=torch.uint8, device="cuda")
+        self._extranonce_gpu = torch.empty(2, dtype=torch.uint8, device="cuda")
         self._t_start = torch.cuda.Event(enable_timing=True)
         self._t_end = torch.cuda.Event(enable_timing=True)
         self._last_found: bool = False
@@ -566,6 +567,10 @@ class AlephiumMiningSession:
         self._blob_gpu[:302].copy_(torch.frombuffer(blob_bytes, dtype=torch.uint8))
         target_bytes = job.target.to_bytes(32, "big")
         self._target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
+        if self._extranonce_set:
+            self._extranonce_gpu.copy_(torch.tensor(self._extranonce_bytes, dtype=torch.uint8, device="cuda"))
+        else:
+            self._extranonce_gpu.zero_()
 
         self._t_start.record()
         self._last_found = False
@@ -577,15 +582,14 @@ class AlephiumMiningSession:
         )
 
         for w in range(self._windows_per_round):
-            base_nonce = self._extranonce_le16 | ((self._window_counter + w) << 16)
-            _base_signed = base_nonce if base_nonce < (1 << 63) else base_nonce - (1 << 64)
-
+            # Keep the kernel counter monotonic and independent from the pool
+            # extranonce. The extranonce is supplied separately to the kernel.
+            base_nonce = (self._window_counter + w) << 16
             self._logger.debug(
-                f"[mine-window] job_id={job.job_id} window_idx={w} base_nonce={base_nonce:#018x} "
-                f"signed_base={_base_signed:#018x}"
+                f"[mine-window] job_id={job.job_id} window_idx={w} base_nonce={base_nonce:#018x}"
             )
             found, raw_nonce = alph_mine_batch(
-                self._blob_gpu, _base_signed, self._WINDOW, self._target_gpu
+                self._blob_gpu, base_nonce, self._WINDOW, self._target_gpu, self._extranonce_gpu
             )
 
             if not found:

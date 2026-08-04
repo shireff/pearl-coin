@@ -18,6 +18,7 @@ void launch_alph_mine_kernel(
     uint64_t base_nonce,
     uint32_t num_nonces,
     const uint8_t* d_target_u8,
+    const uint8_t* d_extranonce,
     int64_t* d_found_nonce,
     uint8_t* d_found_flag,
     cudaStream_t stream);

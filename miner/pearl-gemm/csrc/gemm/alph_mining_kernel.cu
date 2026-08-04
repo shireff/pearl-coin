@@ -35,6 +35,7 @@ void alph_mine_kernel(
     uint64_t base_nonce,
     uint32_t num_nonces,
     const uint32_t* __restrict__ d_target,
+    const uint8_t* __restrict__ d_extranonce,
     int64_t*  __restrict__ d_found_nonce,
     uint8_t*  __restrict__ d_found_flag) {
 
@@ -53,11 +54,24 @@ void alph_mine_kernel(
     if (tid >= num_nonces) return;
     uint64_t nonce = base_nonce + tid;
 
-    // Build the canonical 24-byte nonce in big-endian form.
+    // Build the exact 24-byte nonce layout expected by the pool:
+    //   nonce24[0:2] = extranonce bytes (2 bytes)
+    //   nonce24[2:24] = 22-byte big-endian counter payload.
+    // The kernel only has a 64-bit counter, so we fill the leftmost 8 bytes
+    // of the 22-byte payload from that counter and leave the remaining bytes zero.
     uint8_t nonce24[NOUNCE_LEN];
+    nonce24[0] = d_extranonce[0];
+    nonce24[1] = d_extranonce[1];
     #pragma unroll
-    for (int i = 0; i < NOUNCE_LEN; ++i)
-        nonce24[i] = static_cast<uint8_t>((nonce >> (8 * (NOUNCE_LEN - 1 - i))) & 0xFFu);
+    for (int i = 0; i < 22; ++i) {
+        const int payload_idx = i;
+        if (payload_idx < 8) {
+            const int shift = 8 * (7 - payload_idx);
+            nonce24[2 + i] = static_cast<uint8_t>((nonce >> shift) & 0xFFu);
+        } else {
+            nonce24[2 + i] = 0;
+        }
+    }
 
     // Copy the 302-byte header blob into local 32-bit registers.
     uint32_t r[PADDED_WORDS];
@@ -146,6 +160,7 @@ void launch_alph_mine_kernel(
     uint64_t base_nonce,
     uint32_t num_nonces,
     const uint8_t* d_target_u8,  // 32 bytes big-endian, device ptr
+    const uint8_t* d_extranonce, // 2-byte pool extranonce
     int64_t* d_found_nonce,
     uint8_t* d_found_flag,
     cudaStream_t stream) {
@@ -165,7 +180,7 @@ void launch_alph_mine_kernel(
 
     alph_mine_kernel<<<blocks, THREADS, 0, stream>>>(
         d_blob_words, base_nonce, num_nonces,
-        d_target, d_found_nonce, d_found_flag);
+        d_target, d_extranonce, d_found_nonce, d_found_flag);
 }
 
 } // namespace mining

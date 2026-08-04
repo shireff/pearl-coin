@@ -18,6 +18,8 @@ def test_nonce_layout_prefers_extranonce_prefix_and_22_byte_payload():
     nonce24 = build_full_nonce24_from_counter(extranonce, counter)
     assert len(nonce24) == 24
     assert nonce24[:2] == extranonce
+    assert nonce24[2:10] == counter.to_bytes(8, "big")
+    assert nonce24[10:] == b"\x00" * 14
 
     payload = build_submit_nonce_payload(nonce24)
     assert payload == nonce24[2:].hex()
@@ -27,7 +29,7 @@ def test_nonce_layout_prefers_extranonce_prefix_and_22_byte_payload():
     assert reconstructed == nonce24
 
 
-def test_target_prefers_pool_block_target_over_share_target():
-    assert select_stratum_target(0x1234, 0x5678) == 0x1234
-    assert select_stratum_target(0, 0x5678) == 0x5678
+def test_target_prefers_share_target_over_block_target():
+    assert select_stratum_target(0x1234, 0x5678) == 0x5678
+    assert select_stratum_target(0x1234, 0) == 0x1234
     assert select_stratum_target(0, 0) == 2**256 - 1

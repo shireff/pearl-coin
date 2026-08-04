@@ -1319,9 +1319,10 @@ at::Tensor blake3_keyed_hash(at::Tensor messages, at::Tensor key);
 
 std::tuple<bool, int64_t> alph_mine_batch(
     at::Tensor blob,
-    int64_t base_nonce,
+    uint64_t base_nonce,
     int64_t num_nonces,
-    at::Tensor target) {
+    at::Tensor target,
+    at::Tensor extranonce) {
   CHECK_DEVICE(blob);
   CHECK_DEVICE(target);
   CHECK_CONTIGUOUS(blob);
@@ -1334,6 +1335,12 @@ std::tuple<bool, int64_t> alph_mine_batch(
               "target must be uint8 tensor");
   TORCH_CHECK(target.sizes().equals({32}),
               "target must have shape (32,)");
+  CHECK_DEVICE(extranonce);
+  CHECK_CONTIGUOUS(extranonce);
+  TORCH_CHECK(extranonce.scalar_type() == torch::kUInt8,
+              "extranonce must be uint8 tensor");
+  TORCH_CHECK(extranonce.sizes().equals({2}),
+              "extranonce must have shape (2,)");
 
   at::cuda::CUDAGuard device_guard{(char)blob.get_device()};
   auto stream = at::cuda::getCurrentCUDAStream().stream();
@@ -1346,9 +1353,10 @@ std::tuple<bool, int64_t> alph_mine_batch(
 
   pearl::mining::launch_alph_mine_kernel(
       blob.data_ptr<uint8_t>(),
-      static_cast<uint64_t>(base_nonce),
+      base_nonce,
       static_cast<uint32_t>(num_nonces),
       target.data_ptr<uint8_t>(),
+      extranonce.data_ptr<uint8_t>(),
       found_nonce.data_ptr<int64_t>(),
       found_flag.data_ptr<uint8_t>(),
       stream);
@@ -1803,7 +1811,7 @@ m.def("gpu_mine_batch", &gpu_mine_batch,
   m.def("alph_mine_batch", &alph_mine_batch,
          "Alephium Blake3 GPU mining — returns (found, nonce)",
          py::arg("blob"), py::arg("base_nonce"), py::arg("num_nonces"),
-         py::arg("target"));
+         py::arg("target"), py::arg("extranonce"));
   m.def("gpu_jackpot_hash", &gpu_jackpot_hash,
         "GPU BLAKE3 keyed hash for jackpot arrays",
         py::arg("jackpots"), py::arg("keys"));
@@ -2095,7 +2103,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
   m.def("tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("run_tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("gpu_jackpot_hash(Tensor jackpots, Tensor keys) -> Tensor");
-  m.def("alph_mine_batch(Tensor blob, int base_nonce, int num_nonces, Tensor target) -> (bool, int)");
+  m.def("alph_mine_batch(Tensor blob, int base_nonce, int num_nonces, Tensor target, Tensor extranonce) -> (bool, int)");
   m.def("gpu_lde_eval(Tensor coeffs, Tensor eval_points, int num_coeffs, int num_points, int poly_degree) -> Tensor");
   m.def("gpu_fri_fold(Tensor layer, Tensor challenges, int layer_size) -> Tensor");
   m.def("gpu_merkle_hash(Tensor leaves, int num_leaves) -> Tensor");
