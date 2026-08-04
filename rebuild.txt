@@ -23,7 +23,7 @@ sleep 1
 cd ~/pearl-cion && \
 PEARL_LOG_LEVEL=DEBUG nohup python miner/miner_gpu.py \
   --pool-url stratum+tcp://prl.kryptex.network:7048 \
-  --pool-username krxYM43GWD.worker \
+  --pool-username prl1pcpwfqyehmjlcqdrq5fdmuerz36tkv8tapcq6tetcjrzvrex52dtsymx2kz.worker \
   --pool-password x \
   --pool-algorithm pearl \
   --noise-range 256 \
