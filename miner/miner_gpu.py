@@ -35,6 +35,7 @@ from pearl_gemm import (
 )
 
 from pool_mining_client import PoolMiningClient, PoolMiningJob
+from stratum_client import build_full_nonce24_from_counter, build_submit_nonce_payload
 
 
 DEFAULT_GATEWAY_SOCKET = "/tmp/pearlgw.sock"
@@ -489,34 +490,32 @@ class AlephiumMiningSession:
         → nonce24[0:2] MUST equal extraNonce bytes
         → nonceSansExtraNonce = nonce24[2:]  (22 bytes)
 
-    Our kernel (alph_mine_batch) writes base_nonce as little-endian uint64
-    into buf[0:8], buf[8:24] = zeros. The uint64 increments by 1 per thread.
+    Our kernel (alph_mine_batch) writes a 64-bit counter into the first 8 bytes
+    of the nonce buffer and leaves the remaining 16 bytes zero. The pool expects
+    the 24-byte nonce to be laid out as:
+        full_nonce24 = extranonce(2 bytes) + nonceSansExtraNonce(22 bytes)
 
-    For nonce24[0:2] = extraNonce, we need:
-        nonce_uint64.to_bytes(8, 'little')[0:2] = extraNonce_bytes
-        → uint64 low 16 bits = int.from_bytes(extraNonce_bytes, 'little')
-        → base_nonce = extranonce_le16 + (counter << 16)
+    To keep the pool-compatible layout we build the 24-byte nonce in two stages:
+        1. The first 2 bytes are the pool extranonce.
+        2. The remaining 22 bytes are the search counter payload.
 
-    So base_nonce starts at extranonce_le16 and increments by 0x10000 each
-    round to keep nonce24[0:2] = extraNonce for every nonce in the range.
-
-    Each round searches nonces_per_round values starting at base_nonce,
-    stepping by 1. We ensure the step never wraps through extranonce boundary
-    by sizing nonces_per_round <= 0x10000 (64K) or accepting that only nonces
-    where uint64 & 0xFFFF == extranonce_le16 are valid — the kernel finds the
-    first hash <= target regardless, so we verify nonce24[0:2] after.
+    The CUDA kernel still searches a numeric counter, but we reconstruct the
+    full 24-byte nonce from that counter before hashing and before submitting.
     """
 
     BLOB_PADDED_LEN = 320  # 302 bytes + 18 zero bytes padding to 5×64
 
-    def __init__(self, nonces_per_round: int = 1 << 16):
-        # nonces_per_round = 0x10000 (64K) — keeps nonce24[0:2] = extranonce
-        # for the entire search range (low 16 bits of uint64 don't overflow into byte[2])
+    def __init__(self, nonces_per_round: int = 1 << 24):
+        # nonces_per_round controls how many windows we search per round.
+        # Each window is exactly 0x10000 (64K) nonces with fixed nonce24[0:2]=extranonce.
         self.nonces_per_round = nonces_per_round
-        self._extranonce_le16: int = 0   # low-16-bit seed = int.from_bytes(extranonce,'little')
+        self._WINDOW = 0x10000
+        self._windows_per_round = max(1, nonces_per_round // self._WINDOW)
+        self._extranonce_le16: int = 0
         self._extranonce_bytes: bytes = b"\x00\x00"
-        self._counter: int = 0           # upper 48-bit counter, increments each round
         self._extranonce_set: bool = False
+        self._window_counter: int = 0   # upper 48-bit counter, shared across rounds
+        self._counter_base: int = 0
         from miner_utils import get_logger as _get_logger
         self._logger = _get_logger("alephium_session")
         self._blob_gpu = torch.zeros(self.BLOB_PADDED_LEN, dtype=torch.uint8, device="cuda")
@@ -535,19 +534,14 @@ class AlephiumMiningSession:
     def run_round(self, job: PoolMiningJob) -> tuple[bool, bytes]:
         """Run one GPU mining round.
 
-        Reference: inlined-blake.hpp — kernel writes uint64 little-endian into buf[0:8].
+        Searches self._windows_per_round × 64K nonces per call.
+        Each 64K window has base_nonce with low 16 bits = extranonce_le16,
+        guaranteeing nonce24[0:2] == extranonce for every nonce in the window.
 
-        Nonce layout guarantee:
-            base_nonce = extranonce_le16 + (counter << 16)
-            nonce_uint64 in range [base_nonce, base_nonce + nonces_per_round)
-            nonce24[0:2] = nonce_uint64.to_bytes(8,'little')[0:2]
-                         = (base_nonce & 0xFFFF).to_bytes(2,'little')
-                         = extranonce_le16.to_bytes(2,'little')
-                         = extranonce_bytes  ✓  (since nonces_per_round <= 0x10000)
-
-        Pool reconstruction:
-            pool prepends extraNonce(2) to nonceSans(22):
-            extraNonce(2) + nonceSans(22) = nonce24  ✓  (because nonce24[0:2]=extraNonce)
+        Reference:
+          - inlined-blake.hpp: kernel writes uint64 little-endian into buf[0:8]
+          - stratum spec: full_nonce_24 = extraNonce(2) + nonceSans(22)
+            → nonce24[0:2] must equal extraNonce so pool reconstruction is correct
         """
         self._last_job_id = getattr(job, "job_id", "")
         blob_bytes = bytes(job.blob)
@@ -559,58 +553,83 @@ class AlephiumMiningSession:
             if pool_extranonce and len(pool_extranonce) >= 4:
                 try:
                     eb = bytes.fromhex(pool_extranonce)[:2]
-                    # little-endian: byte[0]=eb[0], byte[1]=eb[1]
-                    # uint64 low 16 bits in little-endian = eb[0] | (eb[1]<<8)
                     self._extranonce_bytes = eb
                     self._extranonce_le16 = eb[0] | (eb[1] << 8)
                     self._extranonce_set = True
+                    self._counter_base = 0
                     self._logger.info(
                         f"[extranonce] {eb.hex()}  le16={self._extranonce_le16:#06x}"
                     )
                 except Exception:
                     pass
 
-        # base_nonce: low 16 bits = extranonce_le16, upper 48 bits = counter
-        # This guarantees nonce24[0:2] = extranonce for every nonce in the range
-        base_nonce = self._extranonce_le16 | (self._counter << 16)
-        self._counter += self.nonces_per_round >> 16  # advance upper bits
-
-        # Load blob and target
         self._blob_gpu[:302].copy_(torch.frombuffer(blob_bytes, dtype=torch.uint8))
         target_bytes = job.target.to_bytes(32, "big")
         self._target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
 
         self._t_start.record()
-        _base_signed = base_nonce if base_nonce < (1 << 63) else base_nonce - (1 << 64)
-        found, raw_nonce = alph_mine_batch(
-            self._blob_gpu,
-            _base_signed,
-            self.nonces_per_round,
-            self._target_gpu,
+        self._last_found = False
+        winning_nonce24 = b"\x00" * 24
+        self._logger.info(
+            f"[mine-round] job_id={job.job_id} windows={self._windows_per_round} "
+            f"extranonce={self._extranonce_bytes.hex() if self._extranonce_set else '<unset>'} "
+            f"window_counter={self._window_counter} target={job.target:#x}"
         )
-        self._t_end.record()
-        self._last_found = bool(found)
 
-        if found:
+        for w in range(self._windows_per_round):
+            base_nonce = self._extranonce_le16 | ((self._window_counter + w) << 16)
+            _base_signed = base_nonce if base_nonce < (1 << 63) else base_nonce - (1 << 64)
+
+            self._logger.debug(
+                f"[mine-window] job_id={job.job_id} window_idx={w} base_nonce={base_nonce:#018x} "
+                f"signed_base={_base_signed:#018x}"
+            )
+            found, raw_nonce = alph_mine_batch(
+                self._blob_gpu, _base_signed, self._WINDOW, self._target_gpu
+            )
+
+            if not found:
+                self._logger.debug(
+                    f"[mine-window] no candidate in job_id={job.job_id} window_idx={w}"
+                )
+                continue
+
             nonce_uint64 = int(raw_nonce) & 0xFFFFFFFFFFFFFFFF
+            self._logger.debug(
+                f"[mine-candidate] job_id={job.job_id} window_idx={w} raw_nonce={nonce_uint64:#018x}"
+            )
             if nonce_uint64 == 0xFFFFFFFFFFFFFFFF:
-                self._last_found = False
-                self._last_nonce24 = b"\x00" * 24
-                self._last_hash_hex = ""
-                self._last_chain_ok = False
-                return False, b"\x00" * 24
+                self._logger.warning(
+                    f"[mine-candidate] invalid sentinel nonce from kernel job_id={job.job_id}"
+                )
+                continue
 
-            # nonce24: uint64 little-endian (8 bytes) + zeros (16 bytes)
-            nonce24 = nonce_uint64.to_bytes(8, "little") + b"\x00" * 16
+            counter_value = self._counter_base + int(nonce_uint64)
+            if counter_value < 0:
+                self._logger.warning(
+                    f"[mine-candidate] negative counter_value job_id={job.job_id} value={counter_value}"
+                )
+                continue
 
-            # Verify nonce24[0:2] == extranonce
+            nonce24 = build_full_nonce24_from_counter(
+                self._extranonce_bytes if self._extranonce_set else b"\x00\x00",
+                counter_value,
+            )
+
             if self._extranonce_set and nonce24[:2] != self._extranonce_bytes:
                 self._logger.warning(
                     f"[extranonce-mismatch] nonce24[0:2]={nonce24[:2].hex()} "
-                    f"!= extranonce={self._extranonce_bytes.hex()} — pool will reject"
+                    f"!= extranonce={self._extranonce_bytes.hex()}"
                 )
+                continue
 
             hash_bytes = alephium_double_blake3(blob_bytes, nonce24)
+            hash_le_target = int.from_bytes(hash_bytes, "big") <= job.target
+            self._logger.info(
+                f"[hash-check] job_id={job.job_id} nonce24={nonce24.hex()} "
+                f"nonceSans={nonce24[2:].hex()} hash={hash_bytes.hex()} "
+                f"hash_le_target={hash_le_target} chain_ok={alephium_group_valid(hash_bytes, self._last_from_group, self._last_to_group)}"
+            )
             self._last_hash_hex = hash_bytes.hex()
             self._last_nonce24 = nonce24
             self._last_from_group = getattr(job, "from_group", None)
@@ -619,11 +638,13 @@ class AlephiumMiningSession:
             self._last_chain_ok = alephium_group_valid(
                 hash_bytes, self._last_from_group, self._last_to_group
             )
+            self._last_found = True
+            winning_nonce24 = nonce24
 
             if not self._last_chain_ok:
-                self._logger.debug(
-                    f"[chain-mismatch] job=({self._last_from_group},{self._last_to_group}) "
-                    f"hash={self._last_hash_hex[:16]}"
+                self._logger.warning(
+                    f"[chain-mismatch] job_id={job.job_id} hash={self._last_hash_hex} "
+                    f"from_group={self._last_from_group} to_group={self._last_to_group}"
                 )
 
             if not getattr(self, "_diag_logged", False):
@@ -639,24 +660,30 @@ class AlephiumMiningSession:
                     f"hash_le_target={int(self._last_hash_hex,16) <= job.target}  "
                     f"chain_ok={self._last_chain_ok}"
                 )
-        else:
-            self._last_nonce24 = b"\x00" * 24
-            self._last_hash_hex = ""
-            self._last_chain_ok = False
+            break  # stop at first valid winner
+
+        self._window_counter += self._windows_per_round
+        self._t_end.record()
 
         if not hasattr(self, "_round_count"):
             self._round_count = 0
         self._round_count += 1
         if self._round_count % 1000 == 1:
             self._logger.info(
-                f"[diag] round={self._round_count}  base_nonce={base_nonce:#018x}  "
-                f"found={found}  target={job.target:#x}"
+                f"[diag] round={self._round_count}  "
+                f"window_counter={self._window_counter:#018x}  "
+                f"target={job.target:#x}"
             )
-        if found:
+        if self._last_found:
             self._logger.info(
                 f"[WINNER] job_id={getattr(job,'job_id','?')}  "
                 f"nonce24={self._last_nonce24.hex()}  chain_ok={self._last_chain_ok}"
             )
+
+        if not self._last_found:
+            self._last_nonce24 = b"\x00" * 24
+            self._last_hash_hex = ""
+            self._last_chain_ok = False
 
         return self._last_found, self._last_nonce24
 
@@ -696,11 +723,12 @@ class AlephiumMiningSession:
 
         # nonceSansExtraNonce = nonce24[2:] — exactly 22 bytes
         # Reference: stratum spec "full_nonce = extraNonce(2) + nonceSansExtraNonce(22)"
-        nonce_sans_hex = self._last_nonce24[2:].hex()  # 22 bytes = 44 hex chars
+        nonce_sans_hex = build_submit_nonce_payload(self._last_nonce24)
 
-        self._logger.debug(
-            f"[submit] nonce24={self._last_nonce24.hex()}  "
-            f"nonceSans={nonce_sans_hex}  ({len(nonce_sans_hex)//2}B)"
+        self._logger.info(
+            f"[submit-prep] job_id={getattr(self, '_last_job_id', '?')} "
+            f"nonce24={self._last_nonce24.hex()} nonceSans={nonce_sans_hex} "
+            f"hash={self._last_hash_hex}"
         )
         return True, nonce_sans_hex, self._last_hash_hex
 

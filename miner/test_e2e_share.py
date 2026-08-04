@@ -156,42 +156,52 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
 
     Nonce layout (reference: inlined-blake.hpp + stratum spec):
         kernel writes uint64 little-endian into buf[0:8], buf[8:24] = zeros
-        nonce24[0:2] MUST equal extraNonce bytes (pool prepends it to nonceSans)
 
-        base_nonce = extranonce_le16 | (counter << 16)
-        where extranonce_le16 = eb[0] | (eb[1]<<8)  (little-endian interpretation)
-        and nonces_per_round <= 0x10000 so low 16 bits never overflow into byte[2]
+        Pool protocol:
+            full_nonce_24 = extraNonce(2) + nonceSans(22)
+            → nonce24[0:2] MUST equal extraNonce
 
-        nonceSansExtraNonce = nonce24[2:]  (22 bytes)
-        pool reconstructs:   extraNonce(2) + nonceSans(22) = nonce24  ✓
+        Our kernel increments the full uint64 by 1 per step, so bytes [0:2]
+        change with every nonce. We cannot guarantee nonce24[0:2]==extranonce
+        for arbitrary nonces — we simply accept the winner if it happens to
+        satisfy nonce24[0:2]==extranonce, and search more rounds if not.
+
+        To maximize valid hits: we set base_nonce so that the START of the
+        range has nonce24[0:2]==extranonce, and use nonces_per_round=0x10000
+        so the range wraps exactly through one period of the low 16 bits,
+        guaranteeing exactly one valid nonce24[0:2]==extranonce match per 64K.
+        For large nonces_per_round, we scan multiple 64K windows per round.
     """
     blob_gpu   = torch.zeros(320, dtype=torch.uint8, device="cuda")
     target_gpu = torch.empty(32,  dtype=torch.uint8, device="cuda")
 
-    # Build extranonce_le16 from pool extranonce
+    # Parse extranonce — 2 bytes from pool
     extranonce_hex = client._extranonce1 or ""
     extranonce_bytes = b"\x00\x00"
-    extranonce_le16 = 0
+    extranonce_le16  = 0
     if extranonce_hex and len(extranonce_hex) >= 4:
         try:
             eb = bytes.fromhex(extranonce_hex)[:2]
             extranonce_bytes = eb
+            # In little-endian uint64: byte[0]=eb[0], byte[1]=eb[1]
+            # → uint64 & 0xFFFF = eb[0] | (eb[1]<<8)
             extranonce_le16 = eb[0] | (eb[1] << 8)
-            print(f"{INFO} extranonce={eb.hex()}  le16={extranonce_le16:#06x}")
         except Exception:
             pass
+    print(f"{INFO} extranonce={extranonce_bytes.hex()}  "
+          f"le16={extranonce_le16:#06x}  (nonce24[0:2] must equal this)")
 
-    # nonces_per_round must be <= 0x10000 to keep nonce24[0:2] = extranonce
-    if nonces_per_round > 0x10000:
-        nonces_per_round = 0x10000
-        print(f"{WARN} nonces_per_round clamped to 0x10000 (64K) to preserve extranonce in nonce24[0:2]")
+    # Use 64K window: guarantees exactly one extranonce-matching nonce per window
+    WINDOW = 0x10000
+    # How many windows fit in the requested nonces_per_round
+    windows_per_round = max(1, nonces_per_round // WINDOW)
+    print(f"{INFO} Using window=64K  windows_per_round={windows_per_round}  "
+          f"effective_nonces={windows_per_round * WINDOW:,}")
 
-    counter = 0  # upper 48-bit counter
+    window_counter = 0  # increments each window, shifts bytes [2:8] of nonce
     deadline = time.time() + timeout
     rounds   = 0
     job      = initial_job
-
-    print(f"{INFO} Starting GPU mining loop  nonces_per_round={nonces_per_round:,}")
 
     while time.time() < deadline:
         rounds += 1
@@ -210,76 +220,79 @@ def mine_until_share(client: StratumClient, initial_job: StratumJob,
 
         blob_gpu[:302].copy_(torch.frombuffer(blob_bytes, dtype=torch.uint8))
         blob_gpu[302:].zero_()
-
         target_bytes = job.target.to_bytes(32, "big")
         target_gpu.copy_(torch.frombuffer(target_bytes, dtype=torch.uint8))
 
-        # base_nonce: low 16 bits = extranonce_le16, upper 48 bits = counter
-        base_nonce = extranonce_le16 | (counter << 16)
-        counter += 1  # each round advances upper bits by 1 (= 0x10000 in nonce space)
+        found_any = False
+        for w in range(windows_per_round):
+            # base_nonce: low 16 bits = extranonce_le16, upper 48 bits = window_counter
+            # → nonce_uint64.to_bytes(8,'little')[0:2] = extranonce_bytes for ALL nonces in window
+            base_nonce = extranonce_le16 | ((window_counter + w) << 16)
+            bn_signed  = base_nonce if base_nonce < (1 << 63) else base_nonce - (1 << 64)
 
-        bn_signed = base_nonce if base_nonce < (1 << 63) else base_nonce - (1 << 64)
+            t0 = time.perf_counter()
+            found, raw_nonce = alph_mine_batch(
+                blob_gpu, bn_signed, WINDOW, target_gpu
+            )
+            elapsed = time.perf_counter() - t0
 
-        t0 = time.perf_counter()
-        found, raw_nonce = alph_mine_batch(blob_gpu, bn_signed, nonces_per_round, target_gpu)
-        elapsed = time.perf_counter() - t0
-        mhs = nonces_per_round / elapsed / 1e6
-
-        if rounds % 500 == 0:
-            remaining = int(deadline - time.time())
-            print(f"{INFO} round={rounds}  MH/s={mhs:.1f}  "
-                  f"base_nonce={base_nonce:#018x}  timeout_in={remaining}s")
-
-        if not found:
-            continue
-
-        nonce_uint64 = int(raw_nonce) & 0xFFFFFFFFFFFFFFFF
-        if nonce_uint64 == 0xFFFFFFFFFFFFFFFF:
-            print(f"{WARN} Sentinel nonce — skipping")
-            continue
-
-        # nonce24: uint64 little-endian (8 bytes) + zeros (16 bytes)
-        nonce24 = nonce_uint64.to_bytes(8, "little") + b"\x00" * 16
-
-        # Verify nonce24[0:2] == extranonce
-        if nonce24[:2] != extranonce_bytes:
-            print(f"{WARN} nonce24[0:2]={nonce24[:2].hex()} != extranonce={extranonce_bytes.hex()} "
-                  f"— pool would reconstruct wrong nonce, skipping")
-            continue
-
-        hash_bytes = py_double_blake3(nonce24, blob_bytes)
-        hash_int   = int.from_bytes(hash_bytes, "big")
-
-        bi = (hash_bytes[30] << 8 | hash_bytes[31]) % 16
-        hash_from_group = bi // 4
-        hash_to_group   = bi % 4
-        job_from_group  = getattr(job, "_from_group", None)
-        job_to_group    = getattr(job, "_to_group", None)
-
-        print(f"\n{INFO} Candidate found!")
-        print(f"  round={rounds}  MH/s={mhs:.1f}")
-        print(f"  nonce_uint64        = {nonce_uint64:#018x}")
-        print(f"  nonce24             = {nonce24.hex()}  (24B)")
-        print(f"  nonce24[0:2]        = {nonce24[:2].hex()}  (must == extranonce)")
-        print(f"  extranonce          = {extranonce_bytes.hex()}")
-        print(f"  nonceSans           = {nonce24[2:].hex()}  (22B, sent to pool)")
-        print(f"  pool_reconstructs   = {extranonce_bytes.hex()}{nonce24[2:].hex()}")
-        print(f"  hash                = {hash_bytes.hex()}")
-        print(f"  target              = {job.target:#x}")
-        print(f"  hash <= target      = {hash_int <= job.target}")
-        print(f"  chain: hash=({hash_from_group},{hash_to_group})  job=({job_from_group},{job_to_group})")
-
-        if hash_int > job.target:
-            print(f"{WARN} Python hash > target — skipping")
-            continue
-
-        if job_from_group is not None and job_to_group is not None:
-            if hash_from_group != job_from_group or hash_to_group != job_to_group:
-                print(f"{WARN} Chain mismatch — skipping, pool would reject")
+            if not found:
                 continue
 
-        nonce_sans_hex = nonce24[2:].hex()   # 22 bytes = 44 hex chars
-        return job.job_id, nonce_sans_hex, hash_bytes.hex(), blob_bytes, nonce24
+            nonce_uint64 = int(raw_nonce) & 0xFFFFFFFFFFFFFFFF
+            if nonce_uint64 == 0xFFFFFFFFFFFFFFFF:
+                continue
+
+            nonce24 = nonce_uint64.to_bytes(8, "little") + b"\x00" * 16
+
+            # Sanity: nonce24[0:2] must be extranonce
+            if nonce24[:2] != extranonce_bytes:
+                # Shouldn't happen with correct base_nonce, but log if it does
+                print(f"{WARN} unexpected: nonce24[0:2]={nonce24[:2].hex()} "
+                      f"!= extranonce={extranonce_bytes.hex()} — base_nonce={base_nonce:#018x}")
+                continue
+
+            hash_bytes = py_double_blake3(nonce24, blob_bytes)
+            hash_int   = int.from_bytes(hash_bytes, "big")
+
+            bi = (hash_bytes[30] << 8 | hash_bytes[31]) % 16
+            hash_fg = bi // 4
+            hash_tg = bi % 4
+            job_fg  = getattr(job, "_from_group", None)
+            job_tg  = getattr(job, "_to_group",   None)
+
+            mhs = WINDOW / elapsed / 1e6
+            print(f"\n{INFO} Candidate found!")
+            print(f"  round={rounds}  window={w}  MH/s={mhs:.1f}")
+            print(f"  nonce_uint64      = {nonce_uint64:#018x}")
+            print(f"  nonce24           = {nonce24.hex()}")
+            print(f"  nonce24[0:2]      = {nonce24[:2].hex()}  == extranonce ✓")
+            print(f"  nonceSans         = {nonce24[2:].hex()}  (22B)")
+            print(f"  pool_reconstructs = {extranonce_bytes.hex()}{nonce24[2:].hex()}")
+            print(f"  hash              = {hash_bytes.hex()}")
+            print(f"  target            = {job.target:#x}")
+            print(f"  hash <= target    = {hash_int <= job.target}")
+            print(f"  chain: hash=({hash_fg},{hash_tg})  job=({job_fg},{job_tg})")
+
+            if hash_int > job.target:
+                print(f"{WARN} hash > target — skipping")
+                continue
+
+            if job_fg is not None and job_tg is not None:
+                if hash_fg != job_fg or hash_tg != job_tg:
+                    print(f"{WARN} chain mismatch — skipping")
+                    continue
+
+            nonce_sans_hex = nonce24[2:].hex()
+            window_counter += windows_per_round
+            return job.job_id, nonce_sans_hex, hash_bytes.hex(), blob_bytes, nonce24
+
+        window_counter += windows_per_round
+
+        if rounds % 100 == 0:
+            remaining = int(deadline - time.time())
+            print(f"{INFO} round={rounds}  window_counter={window_counter}  "
+                  f"timeout_in={remaining}s")
 
     print(f"{FAIL} Timeout: no share found in {timeout}s after {rounds} rounds")
     sys.exit(2)

@@ -138,6 +138,10 @@ class PoolMiningClient:
             f"nonce={nonce_preview}  nonce_full={nonce}  nonce_len={len(nonce)//2}B  "
             f"result_hex={result_hex[:16] if result_hex else '<empty>'}  worker_id={worker_id}"
         )
+        self._logger.info(
+            f"[SUBMIT-DETAILS] connected={self.is_connected()} job_id={target_job_id} "
+            f"current_job_exists={self._current_job is not None} current_job_id={getattr(self._current_job, 'job_id', '?')}"
+        )
 
         if self.algorithm == "alephium":
             success = self._stratum.submit_share(target_job_id, nonce)
@@ -152,6 +156,10 @@ class PoolMiningClient:
             self._logger.warning(
                 f"[SUBMIT SKIP/FAIL] job_id={target_job_id}  nonce={nonce_preview}  "
                 f"(rate-limited or send error)"
+            )
+            self._logger.warning(
+                f"[SUBMIT-FAIL-CAUSE] algorithm={self.algorithm} connected={self.is_connected()} "
+                f"worker_id={worker_id} stratum_connected={self._stratum is not None and self._stratum.is_connected()}"
             )
 
         return success

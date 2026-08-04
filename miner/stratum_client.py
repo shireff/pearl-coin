@@ -8,6 +8,38 @@ from typing import Any, Callable, Optional
 from miner_utils import get_logger
 
 
+def build_full_nonce24_from_counter(extranonce_bytes: bytes, counter: int) -> bytes:
+    """Build the 24-byte Alephium nonce from a 2-byte pool extranonce and a counter.
+
+    Kryptex reconstructs the full nonce as:
+        full_nonce24 = extranonce(2 bytes) + nonceSansExtraNonce(22 bytes)
+    The pool expects the first 2 bytes of the full nonce to be the extranonce.
+    """
+    if len(extranonce_bytes) != 2:
+        raise ValueError("extranonce_bytes must be exactly 2 bytes")
+    if counter < 0:
+        raise ValueError("counter must be non-negative")
+
+    counter_bytes = counter.to_bytes(22, "big")
+    return extranonce_bytes + counter_bytes
+
+
+def build_full_nonce24_from_payload(extranonce_bytes: bytes, payload22: bytes) -> bytes:
+    """Reconstruct the 24-byte nonce from the pool-visible 22-byte payload."""
+    if len(extranonce_bytes) != 2:
+        raise ValueError("extranonce_bytes must be exactly 2 bytes")
+    if len(payload22) != 22:
+        raise ValueError("payload22 must be exactly 22 bytes")
+    return extranonce_bytes + payload22
+
+
+def build_submit_nonce_payload(nonce24: bytes) -> str:
+    """Return the hex payload that should be submitted to the pool."""
+    if len(nonce24) != 24:
+        raise ValueError("nonce24 must be exactly 24 bytes")
+    return nonce24[2:].hex()
+
+
 @dataclass
 class StratumJob:
     job_id: str
