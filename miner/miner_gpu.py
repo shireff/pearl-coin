@@ -892,28 +892,37 @@ def main():
         total_elapsed = 0.0
 
         _current_job = None
-        _job_cycle_idx = 0  # round-robin index into job_map for Alephium
+        _last_pool_job_id = ""
+        _last_pool_job_seen = 0.0
+
+        def _log_job_state(job_id: str, pool_job_id: str, submit_job_id: str | None = None, submit_match: bool | None = None) -> None:
+            if submit_job_id is None and submit_match is None:
+                logger.info(f"[JOB-STATE] active_job={job_id} latest_pool_job={pool_job_id}")
+            else:
+                logger.info(
+                    f"[JOB-STATE] active_job={job_id} latest_pool_job={pool_job_id} "
+                    f"submit_job={submit_job_id or '-'} submit_matches_active={submit_match}"
+                )
 
         while True:
             try:
-                # For Alephium: cycle through all available chain jobs in round-robin.
-                # The pool sends one job per chain (up to 16 chains). By rotating
-                # through them, each round mines a different chain so the winner's
-                # chain will naturally match the current job.
+                # For Alephium, the pool can emit many fast-changing jobs. Mining against
+                # an older job quickly becomes stale, so we prefer the newest queued job
+                # and fall back to the client's current job when the queue is empty.
                 if pool_mode and pool_algorithm == "alephium" and isinstance(_client_ref[0], PoolMiningClient):
-                    with _client_ref[0]._job_lock:
-                        all_jobs = list(_client_ref[0]._job_map.values())
-                    if all_jobs:
-                        _job_cycle_idx = _job_cycle_idx % len(all_jobs)
-                        _current_job = all_jobs[_job_cycle_idx]
-                        _job_cycle_idx += 1
-                    else:
-                        # No jobs in map yet — fall back to queue
-                        try:
-                            _current_job = _job_queue.get_nowait()
-                        except _queue.Empty:
-                            if _current_job is None:
-                                _current_job = _job_queue.get(timeout=5.0)
+                    try:
+                        latest = _job_queue.get_nowait()
+                        while True:
+                            try:
+                                latest = _job_queue.get_nowait()
+                            except _queue.Empty:
+                                break
+                        _current_job = latest
+                    except _queue.Empty:
+                        with _client_ref[0]._job_lock:
+                            _current_job = _client_ref[0]._current_job
+                        if _current_job is None:
+                            _current_job = _job_queue.get(timeout=5.0)
                 else:
                     # Non-blocking: drain queue and take the latest job only.
                     try:
@@ -927,6 +936,18 @@ def main():
                     except _queue.Empty:
                         if _current_job is None:
                             _current_job = _job_queue.get(timeout=5.0)
+
+                mining_job = _current_job
+                if pool_mode and pool_algorithm == "alephium" and isinstance(_client_ref[0], PoolMiningClient):
+                    with _client_ref[0]._job_lock:
+                        latest_pool_job = _client_ref[0]._current_job
+                    if latest_pool_job is not None:
+                        _last_pool_job_id = getattr(latest_pool_job, "job_id", "") or _last_pool_job_id
+                        _last_pool_job_seen = time.monotonic()
+                    _log_job_state(
+                        getattr(mining_job, "job_id", "") or "-",
+                        _last_pool_job_id or "-",
+                    )
 
                 mining_job = _current_job
                 if isinstance(session, AlephiumMiningSession):
@@ -958,6 +979,7 @@ def main():
                         ok, nonce_hex, result_hex = session.get_last_result()
                         if ok and nonce_hex:
                             job_id = getattr(mining_job, "job_id", "")
+                            submit_matches = bool(job_id and job_id == getattr(_client_ref[0]._current_job, "job_id", "")) if pool_mode and pool_algorithm == "alephium" else None
                             success = _client_ref[0].submit_plain_proof(nonce_hex, result_hex, job_id)
                             if success:
                                 logger.info(
@@ -966,6 +988,13 @@ def main():
                                 )
                             else:
                                 logger.debug(f"[SUBMIT SKIP] Rate-limited  job_id={job_id}")
+                            if pool_mode and pool_algorithm == "alephium":
+                                _log_job_state(
+                                    job_id or "-",
+                                    _last_pool_job_id or "-",
+                                    submit_job_id=job_id or "-",
+                                    submit_match=submit_matches,
+                                )
                         else:
                             # chain_ok=False — the hash chain doesn't match this job.
                             # The nonce is valid (hash<=target) but for a different chain.
