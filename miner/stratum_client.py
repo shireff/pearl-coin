@@ -130,18 +130,13 @@ class StratumClient:
             # Worker must be the full "wallet.workerName" format for pool attribution.
             worker_name = self.username  # always use full username (wallet.worker)
 
-            # Alephium Stratum: submit nonceSansExtraNonce (22 bytes = full24 minus extranonce).
-            # Pool prepends extraNonce(2B) to reconstruct the full 24-byte nonce for hash verification.
-            # nonce layout: bytes[0:16]=zeros, bytes[16:18]=extranonce, bytes[18:24]=counter
-            # nonceSansExtraNonce = bytes[0:16] + bytes[18:24] = 22 bytes = 44 hex chars
-            if len(nonce) == 48:
-                nonce_submit = nonce[:32] + nonce[36:]  # remove extranonce at chars[32:36]
-            else:
-                nonce_submit = nonce
+            # Send full 24-byte nonce directly.
+            # Pool verifies: blake3(blake3(nonce24 + headerBlob)) without any extranonce prepend.
+            # This is confirmed by the pool's blockTemplate.hash() implementation.
+            nonce_submit = nonce
 
             self._logger.info(
-                f"Pool submit: job={job_id} nonce_sans={nonce_submit} "
-                f"full={nonce} extranonce={self._extranonce1}"
+                f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1}"
             )
             sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit, worker_name], use_null_id=True)
             return sent
