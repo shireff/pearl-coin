@@ -1,0 +1,35 @@
+pkill -f miner_gpu.py; sleep 1
+
+cd ~/pearl-cion/miner/pearl-gemm && rm -rf build src/pearl_gemm_cuda*.so && export CUDA_HOME=/usr/local/cuda TORCH_EXTENSION_SKIP_CUDA_VERSION_CHECK=1 MAX_JOBS=4 && python setup.py build_ext --inplace
+
+تأكيد النجاح:
+stat -c '%y %n' ~/pearl-cion/miner/pearl-gemm/src/pearl_gemm_cuda*.so
+python3 -c "import sys; sys.path.insert(0,'src'); from pearl_gemm import alph_mine_batch; print('OK')"
+
+التشغيل:
+pkill -f miner_gpu.py; sleep 1
+cd ~/pearl-cion && PEARL_LOG_LEVEL=DEBUG python miner/miner_gpu.py \
+  --pool-url stratum+tcp://alph.kryptex.network:7010 \
+  --pool-username 3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker \
+  --pool-password x --noise-range 256 --P 8 --Q 8 \
+  > /tmp/miner_live.log 2>&1 & echo "PID: $!"
+
+
+for background run
+
+pkill -f miner_gpu.py; sleep 1
+cd ~/pearl-cion && nohup env PEARL_LOG_LEVEL=DEBUG python miner/miner_gpu.py \
+  --pool-url stratum+tcp://alph.kryptex.network:7010 \
+  --pool-username 3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui.worker \
+  --pool-password x --noise-range 256 --P 8 --Q 8 \
+  > /tmp/miner_live.log 2>&1 & echo "PID: $!"
+
+
+
+أمر المراقبة اللايف:
+
+tail -f /tmp/miner_live.log | strings | grep -E "WINNER|submit|SHARE|error|Error|closed|difficulty|ACCEPTED|REJECTED"
+
+
+أمر الـ API للتحقق من الشيرات:
+curl -s "https://api.kryptex.network/api/v1/pool/alph/workers?wallet=3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui" | python3 -m json.tool 2>/dev/null || echo "API not available — check dashboard manually"

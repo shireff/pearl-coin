@@ -2103,7 +2103,7 @@ TORCH_LIBRARY(pearl_gemm, m) {
   m.def("tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("run_tensor_hash(Tensor data, Tensor key, Tensor(out!) out, Tensor(roots!) roots, int num_threads = 128, int num_stages = 2, int leaves_per_mt_block = 512) -> ()");
   m.def("gpu_jackpot_hash(Tensor jackpots, Tensor keys) -> Tensor");
-  m.def("alph_mine_batch(Tensor blob, int64_t base_nonce, int64_t num_nonces, Tensor target, Tensor extranonce) -> (bool, int)");
+  m.def("alph_mine_batch(Tensor blob, int base_nonce, int num_nonces, Tensor target, Tensor extranonce) -> (bool, int)");
   m.def("gpu_lde_eval(Tensor coeffs, Tensor eval_points, int num_coeffs, int num_points, int poly_degree) -> Tensor");
   m.def("gpu_fri_fold(Tensor layer, Tensor challenges, int layer_size) -> Tensor");
   m.def("gpu_merkle_hash(Tensor leaves, int num_leaves) -> Tensor");
