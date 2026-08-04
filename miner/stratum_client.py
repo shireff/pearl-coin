@@ -103,7 +103,10 @@ class StratumClient:
         # Using block_target from targetBlob as fallback (set_difficulty updates this).
         self._share_target: Optional[int] = None
         self._difficulty_received = threading.Event()
-        self._last_submit_time: float = 0.0  # rate-limit: max 1 submit per 10s
+        self._last_submit_time: float = 0.0
+        self._submit_cooldown_seconds = 0.25
+        self._max_submit_cooldown_seconds = 2.0
+        self._min_submit_cooldown_seconds = 0.25
         self._job_id_counter = 0
         self._pending_requests: dict[int, tuple[threading.Event, list]] = {}
         self._lock = threading.Lock()
@@ -166,33 +169,56 @@ class StratumClient:
             return False
 
         if self.algorithm == "alephium":
-            # The pool already controls the share difficulty via set_difficulty/set_target.
-            # Do not impose an extra artificial throttle here; valid shares should be
-            # submitted immediately once their chain matches the current job.
-            self._last_submit_time = time.time()
+            # Use a small, bounded cooldown to avoid flooding the pool with back-to-back
+            # submissions while still allowing shares through quickly.
+            wait_seconds = self._get_submit_wait_time()
+            if wait_seconds > 0:
+                self._logger.info(f"[SUBMIT THROTTLE] waiting {wait_seconds:.3f}s before submit")
+                time.sleep(wait_seconds)
 
             # Use the pool-authorized worker id when it is known; otherwise fall back
             # to the full username so the submit payload remains compatible.
             worker_name = self._worker_id if self._worker_id else self.username
 
-            # Send full 24-byte nonce directly.
-            # Pool verifies: blake3(blake3(nonce24 + headerBlob)) without any extranonce prepend.
-            # This is confirmed by the pool's blockTemplate.hash() implementation.
+            # Submit the pool-visible nonce payload using the normal Stratum request/response
+            # flow so pool accept/reject feedback is captured explicitly.
             nonce_submit = nonce
 
             self._logger.info(
-                f"Pool submit: job={job_id} nonce={nonce_submit} extranonce={self._extranonce1}"
+                f"Pool submit: job={job_id} nonce={nonce_submit} worker={worker_name}"
             )
-            sent = self._send_fire_and_forget("mining.submit", [job_id, nonce_submit, worker_name], use_null_id=True)
-            if not sent:
+            response = self._send_request(
+                "mining.submit",
+                [job_id, nonce_submit, worker_name],
+                timeout=15.0,
+            )
+            if response is None:
                 self._logger.error(
-                    f"Share send failed: job={job_id} nonce={nonce[:16]}... "
+                    f"Share submit timed out: job={job_id} nonce={nonce[:16]}... "
                     f"socket_connected={self._sock is not None}"
                 )
-            return sent
-        else:
-            worker = self.worker_name if self.worker_name else self.username.split(".")[0]
-            params = [job_id, nonce, result, worker]
+                self._record_submit_result(False, None, timed_out=True)
+                return False
+
+            result_val = response.get("result", False)
+            error = response.get("error")
+            if error:
+                reason = self._format_submit_reason(error)
+                self._logger.warning(f"[SUBMIT REJECT] job={job_id} nonce={nonce_submit} reason={reason}")
+                self._record_submit_result(False, error)
+                return False
+            if result_val is True:
+                self._logger.info(f"[SUBMIT ACCEPT] job={job_id} nonce={nonce_submit}")
+                self._record_submit_result(True, None)
+                return True
+
+            reason = self._format_submit_reason(result_val)
+            self._logger.warning(f"[SUBMIT REJECT] job={job_id} nonce={nonce_submit} reason={reason}")
+            self._record_submit_result(False, None)
+            return False
+
+        worker = self.worker_name if self.worker_name else self.username.split(".")[0]
+        params = [job_id, nonce, result, worker]
 
         response = self._send_request("mining.submit", params, timeout=30.0)
         if response is None:
@@ -205,6 +231,49 @@ class StratumClient:
         else:
             self._logger.info(f"Pool submit response: result={result_val}")
         return result_val is True
+
+    def _get_submit_wait_time(self) -> float:
+        now = time.monotonic()
+        if self._last_submit_time <= 0:
+            return 0.0
+        return max(0.0, self._submit_cooldown_seconds - (now - self._last_submit_time))
+
+    def _record_submit_result(self, success: bool, error: Any = None, timed_out: bool = False) -> None:
+        self._last_submit_time = time.monotonic()
+        if success:
+            self._submit_cooldown_seconds = max(
+                self._min_submit_cooldown_seconds,
+                self._submit_cooldown_seconds * 0.75,
+            )
+            return
+
+        if timed_out or self._looks_like_rate_limit_error(error):
+            self._submit_cooldown_seconds = min(
+                self._max_submit_cooldown_seconds,
+                self._submit_cooldown_seconds * 2.0,
+            )
+        else:
+            self._submit_cooldown_seconds = max(
+                self._min_submit_cooldown_seconds,
+                self._submit_cooldown_seconds * 0.9,
+            )
+
+    def _looks_like_rate_limit_error(self, error: Any) -> bool:
+        if error is None:
+            return False
+        text = str(error).lower()
+        return any(token in text for token in ["rate", "limit", "too many", "slow", "flood"])
+
+    def _format_submit_reason(self, reason: Any) -> str:
+        if reason is None:
+            return "unknown"
+        if isinstance(reason, dict):
+            if "message" in reason:
+                return str(reason["message"])
+            return json.dumps(reason, ensure_ascii=False, sort_keys=True)
+        if isinstance(reason, (list, tuple)):
+            return ", ".join(str(item) for item in reason)
+        return str(reason)
 
     def _subscribe_and_authorize(self) -> bool:
         # Alephium Stratum: mining.hello is optional — send fire-and-forget, don't block.

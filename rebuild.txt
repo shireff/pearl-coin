@@ -30,6 +30,8 @@ cd ~/pearl-cion && nohup env PEARL_LOG_LEVEL=DEBUG python miner/miner_gpu.py \
 
 tail -f /tmp/miner_live.log | strings | grep -E "WINNER|submit|SHARE|error|Error|closed|difficulty|ACCEPTED|REJECTED"
 tail -f /tmp/miner_live.log | grep -E "WINNER|submit-prep|SUBMIT OK|rate-limited|Share send failed|SUBMIT SKIP"
+tail -f /tmp/miner_live.log | grep -E --line-buffered 'SUBMIT|REJECT|ERROR|WARNING|Traceback'
+
 
 أمر الـ API للتحقق من الشيرات:
 curl -s "https://api.kryptex.network/api/v1/pool/alph/workers?wallet=3cUrDWnDxgFVy1V8dEWjWR4npf5EcJKESoDNjL2Nmn4mssdW7n2Ui" | python3 -m json.tool 2>/dev/null || echo "API not available — check dashboard manually"
