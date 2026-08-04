@@ -202,7 +202,7 @@ class StratumClient:
             self._record_submit_result(False, "send_failed")
             return False
 
-        worker = self.worker_name if self.worker_name else self.username.split(".")[0]
+        worker = self.worker_name if self.worker_name else self.username
         params = [job_id, nonce, result, worker]
 
         response = self._send_request("mining.submit", params, timeout=30.0)
