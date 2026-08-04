@@ -365,6 +365,7 @@ class MiningGraphSession:
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
         self._last_hashes: Optional[torch.Tensor] = None
         self._last_keys: Optional[torch.Tensor] = None
+        self._last_mining_job: Optional[object] = None
 
         # ── Pre-allocated target buffer (updated in-place each round) ────
         self._target_buf = torch.zeros(8, dtype=torch.int64, device="cuda")
@@ -458,6 +459,7 @@ class MiningGraphSession:
         any_winner = win.any()
         self._last_hashes = hashes_i64.cpu()
         self._last_keys = self.keys.cpu()
+        self._last_mining_job = mining_job
         self._t_end.record()
         return bool(any_winner)
 
@@ -473,6 +475,30 @@ class MiningGraphSession:
             noise_rank=self.rank,
         )
         return create_proof(open_block, mining_job.incomplete_header_bytes)
+
+    def get_last_result(self) -> tuple[bool, str, str]:
+        """Return (ok, proof_hex, result_hex) for pool submission.
+
+        For Pearl (PRL), the 'nonce' submitted to the pool is the full proof
+        binary serialised as hex. result_hex is left empty because the pool
+        derives the result itself from the proof.
+        """
+        if self._last_mining_job is None or self._last_hashes is None:
+            return False, "", ""
+        try:
+            proof = self.build_proof(self._last_mining_job)
+            if proof is None:
+                return False, "", ""
+            # proof may be bytes or a proto/dataclass — serialise to hex
+            if isinstance(proof, (bytes, bytearray)):
+                proof_hex = proof.hex()
+            elif hasattr(proof, "SerializeToString"):
+                proof_hex = proof.SerializeToString().hex()
+            else:
+                proof_hex = str(proof)
+            return True, proof_hex, ""
+        except Exception as e:
+            return False, "", ""
 
     def close(self):
         if self._noise_graph is not None:
