@@ -272,7 +272,8 @@ class StratumClient:
         if self.algorithm == "alephium":
             subscribe_params = ["alephium-gpu-miner/1.0.0", "AlephiumStratum/1.0.0"]
         else:
-            subscribe_params = []
+            # Pearl pool uses subscribe params[0] as the miner name in dashboard
+            subscribe_params = ["pearl-gpu-miner/1.0.0"]
 
         subscribe_timeout = 1.0 if self.algorithm == "pearl" else 10.0
         subscribe_response = self._send_request(

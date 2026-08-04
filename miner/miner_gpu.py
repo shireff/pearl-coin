@@ -442,16 +442,19 @@ class MiningGraphSession:
 
         hashes = gpu_jackpot_hash(jackpots, self.keys)
         _target_int = int(mining_job.target)
+        # Build target words MSB-first (word[0]=MSB, word[7]=LSB).
+        # The pool target may be < 256 bits so the MSB words must be first
+        # to avoid word[7]=0 causing every hash to fail the comparison.
         self._target_buf.copy_(
             torch.tensor(
-                [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(8)],
+                [(_target_int >> (32 * i)) & 0xFFFFFFFF for i in range(7, -1, -1)],
                 dtype=torch.int64, device="cpu"
             ).cuda(non_blocking=True)
         )
         hashes_i64 = hashes.view(-1, 8).to(dtype=torch.int64)
         win = torch.zeros(hashes_i64.size(0), dtype=torch.bool, device="cuda")
         eq = torch.ones(hashes_i64.size(0), dtype=torch.bool, device="cuda")
-        for i in range(7, -1, -1):
+        for i in range(8):
             smaller = hashes_i64[:, i] < self._target_buf[i]
             equal = hashes_i64[:, i] == self._target_buf[i]
             win |= smaller & eq
