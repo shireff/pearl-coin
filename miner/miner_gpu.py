@@ -242,6 +242,11 @@ def parse_args():
     g.add_argument("--alph-nonces-per-round", type=int,
                    default=int(os.environ.get("miner_alph_nonces_per_round", str(1 << 24))),
                    help="Alephium nonces per GPU round (default: 16M = 1<<24, higher = more MH/s)")
+    # Debug helpers for testing only (override pool target locally)
+    g.add_argument("--debug-easy-target", default=None,
+                   help="Hex 256-bit target to override pool target for testing (e.g. ffffff... or 0000fff...)")
+    g.add_argument("--debug-difficulty", type=float, default=0.0,
+                   help="Set a synthetic share difficulty (difficulty = 2^256 / target) for testing; overrides pool target if >0")
     return parser.parse_args()
 
 
@@ -985,6 +990,24 @@ def main():
                             _current_job = _job_queue.get(timeout=5.0)
 
                 mining_job = _current_job
+                # Debug override: allow user to force an easy target locally for testing.
+                if mining_job is not None:
+                    try:
+                        if getattr(args, "debug_difficulty", 0) and float(args.debug_difficulty) > 0:
+                            # difficulty -> target = floor((2^256 - 1) / difficulty)
+                            diff = float(args.debug_difficulty)
+                            if diff > 0:
+                                override_target = (2**256 - 1) // int(diff)
+                                setattr(mining_job, "target", int(override_target))
+                        elif getattr(args, "debug_easy_target", None):
+                            t = str(args.debug_easy_target).strip().lower()
+                            if t.startswith("0x"):
+                                t = t[2:]
+                            if len(t) > 0:
+                                override_target = int(t, 16)
+                                setattr(mining_job, "target", int(override_target))
+                    except Exception:
+                        pass
                 if pool_mode and pool_algorithm == "alephium" and isinstance(_client_ref[0], PoolMiningClient):
                     with _client_ref[0]._job_lock:
                         latest_pool_job = _client_ref[0]._current_job
