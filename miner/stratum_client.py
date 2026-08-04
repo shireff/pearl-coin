@@ -171,8 +171,9 @@ class StratumClient:
             # submitted immediately once their chain matches the current job.
             self._last_submit_time = time.time()
 
-            # Worker must be the full "wallet.workerName" format for pool attribution.
-            worker_name = self.username  # always use full username (wallet.worker)
+            # Use the pool-authorized worker id when it is known; otherwise fall back
+            # to the full username so the submit payload remains compatible.
+            worker_name = self._worker_id if self._worker_id else self.username
 
             # Send full 24-byte nonce directly.
             # Pool verifies: blake3(blake3(nonce24 + headerBlob)) without any extranonce prepend.
