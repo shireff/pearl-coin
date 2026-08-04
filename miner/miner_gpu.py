@@ -59,11 +59,23 @@ def alephium_submit_nonce_24(nonce: int) -> bytes:
 
 
 def alephium_double_blake3(header_blob: bytes, nonce: int) -> bytes:
-    """Compute the official Alephium double-BLAKE3 candidate contract.
+    """Compute the Alephium double-BLAKE3 hash matching pool verification.
 
-    Canonical serialization is nonce24 || headerBlob, then a two-stage BLAKE3 digest.
+    Pool reconstructs full nonce as: extranonce(2) + nonceSansExtraNonce(22)
+    where nonceSansExtraNonce = zeros(14) + counter(8) big-endian.
+
+    The full 24-byte nonce sent by miner (big-endian of uint64):
+      nonce_uint64 layout: extranonce(2) || zeros(14) || counter(8)
+      In 24-byte big-endian: zeros(16) || extranonce(2) || counter(6)
+
+    BUT our kernel uses base_nonce = extranonce << 48, so:
+      nonce_uint64 = extranonce << 48 | counter(6B)
+      nonce24 big-endian = zeros(16) || extranonce(2) || counter(6)
+
+    Pool hash = blake3(blake3(nonce24 || headerBlob))
+    This function computes that directly from nonce_int.
     """
-    nonce_bytes = alephium_submit_nonce_24(nonce)
+    nonce_bytes = nonce.to_bytes(24, "big")
     inner = blake3.blake3(nonce_bytes + header_blob).digest()
     return blake3.blake3(inner).digest()
 
