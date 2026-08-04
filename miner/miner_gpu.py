@@ -624,20 +624,21 @@ class AlephiumMiningSession:
                 continue
 
             hash_bytes = alephium_double_blake3(blob_bytes, nonce24)
+            job_from_group = getattr(job, "from_group", None)
+            job_to_group = getattr(job, "to_group", None)
+            chain_ok = alephium_group_valid(hash_bytes, job_from_group, job_to_group)
             hash_le_target = int.from_bytes(hash_bytes, "big") <= job.target
             self._logger.info(
                 f"[hash-check] job_id={job.job_id} nonce24={nonce24.hex()} "
                 f"nonceSans={nonce24[2:].hex()} hash={hash_bytes.hex()} "
-                f"hash_le_target={hash_le_target} chain_ok={alephium_group_valid(hash_bytes, self._last_from_group, self._last_to_group)}"
+                f"hash_le_target={hash_le_target} chain_ok={chain_ok}"
             )
             self._last_hash_hex = hash_bytes.hex()
             self._last_nonce24 = nonce24
-            self._last_from_group = getattr(job, "from_group", None)
-            self._last_to_group = getattr(job, "to_group", None)
+            self._last_from_group = job_from_group
+            self._last_to_group = job_to_group
             self._last_block_target = getattr(job, "block_target", 0)
-            self._last_chain_ok = alephium_group_valid(
-                hash_bytes, self._last_from_group, self._last_to_group
-            )
+            self._last_chain_ok = chain_ok
             self._last_found = True
             winning_nonce24 = nonce24
 
@@ -937,7 +938,7 @@ def main():
                         f"[ROUND] alephium  time={elapsed*1000:.1f}ms  "
                         f"nonces={session.nonces_per_round}  "
                         f"MH/s={tmok_per_s:.2f}  "
-                        f"base_nonce={session._base_nonce:#018x}"
+                        f"window_counter={session._window_counter:#018x}"
                     )
                 else:
                     tmok = (session.tile_h * session.tile_w * session.P * session.Q * session.num_jobs) / session.rank / 1000.0

@@ -40,6 +40,19 @@ def build_submit_nonce_payload(nonce24: bytes) -> str:
     return nonce24[2:].hex()
 
 
+def select_stratum_target(block_target: int | None, share_target: int | None) -> int:
+    """Choose the target to mine against.
+
+    For Alephium, the pool validates against the block target from targetBlob.
+    We should prefer that over any easier share target derived from difficulty.
+    """
+    if block_target and block_target > 0:
+        return int(block_target)
+    if share_target is not None and share_target > 0:
+        return int(share_target)
+    return 2**256 - 1
+
+
 @dataclass
 class StratumJob:
     job_id: str
@@ -413,15 +426,11 @@ class StratumClient:
             with self._lock:
                 share_target = self._share_target
 
-            # GPU mines against share_target (easy, from set_difficulty) to find candidates fast.
-            # Before submitting, get_last_result verifies hash <= block_target (targetBlob).
-            # Pool processShare validates hash <= job.target = targetBlob.
-            if share_target is not None:
-                target = share_target       # use easy share target for GPU speed
-            elif block_target:
-                target = block_target       # fallback: mine directly against block target
-            else:
-                target = 2**256 - 1
+            # Prefer the pool's block target (targetBlob) for Alephium mining.
+            # The share target derived from set_difficulty is only a fallback if the
+            # pool never sends a targetBlob.
+            target = select_stratum_target(block_target, share_target)
+            if target == 2**256 - 1:
                 self._logger.warning(
                     f"[WARN] Job {job_id}: no target — using max, shares won't submit"
                 )
